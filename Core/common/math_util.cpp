@@ -3,7 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
-#include "math_util.h"
+#include "common/math_util.h"
 
 #if defined(CITRA_HAS_SSE42)
 #include <emmintrin.h>

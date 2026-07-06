@@ -10,7 +10,7 @@
 #else
 #include <dlfcn.h>
 #endif
-#include "dynamic_library.h"
+#include "common/dynamic_library/dynamic_library.h"
 
 namespace Common {
 

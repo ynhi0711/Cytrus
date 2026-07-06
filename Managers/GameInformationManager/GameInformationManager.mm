@@ -7,7 +7,7 @@
 
 #import "GameInformationManager.h"
 
-#import "Cytrus-Swift.h"
+#import "CytrusTypes.h"
 
 namespace {
     std::vector<uint8_t> GetSMDHData(const std::unique_ptr<Loader::AppLoader>& loader) {

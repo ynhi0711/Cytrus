@@ -7,7 +7,7 @@
 #include <ws2tcpip.h>
 #endif
 
-#include "socket_manager.h"
+#include "network/socket_manager.h"
 
 namespace Network {
 std::atomic<u32> SocketManager::count = 0;

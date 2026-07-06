@@ -2,7 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
-#include "dlp_clt_base.h"
+#include "core/hle/service/dlp/dlp_clt_base.h"
 
 #include "common/alignment.h"
 #include "common/string_util.h"

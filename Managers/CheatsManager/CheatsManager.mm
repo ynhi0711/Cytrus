@@ -8,7 +8,7 @@
 
 #import "CheatsManager.h"
 
-#import "Cytrus-Swift.h"
+#import "CytrusTypes.h"
 
 @interface CytrusCheatsManager () {
     Cheats::CheatEngine* _cheat_engine;

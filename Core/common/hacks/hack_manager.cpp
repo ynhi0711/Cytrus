@@ -3,7 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
-#include "hack_manager.h"
+#include "common/hacks/hack_manager.h"
 
 namespace Common::Hacks {
 const HackEntry* HackManager::GetHack(const HackType& type, u64 title_id) {

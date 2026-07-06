@@ -26,7 +26,7 @@
 #include "video_core/host_shaders/texture_filtering/x_gradient_frag.h"
 #include "video_core/host_shaders/texture_filtering/xbrz_freescale_frag.h"
 #include "video_core/host_shaders/texture_filtering/y_gradient_frag.h"
-#include "vk_blit_helper.h"
+#include "video_core/renderer_vulkan/vk_blit_helper.h"
 
 namespace Vulkan {
 

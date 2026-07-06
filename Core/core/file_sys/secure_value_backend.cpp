@@ -3,7 +3,7 @@
 // Refer to the license.txt file included.
 
 #include "common/archives.h"
-#include "secure_value_backend.h"
+#include "core/file_sys/secure_value_backend.h"
 
 SERIALIZE_EXPORT_IMPL(FileSys::DefaultSecureValueBackend)
 

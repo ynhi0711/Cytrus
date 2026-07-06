@@ -12,7 +12,7 @@
 #import "InputManager.h"
 #import "SoftwareKeyboard.h"
 
-#import "Cytrus-Swift.h"
+#import "CytrusTypes.h"
 
 #include <Metal.hpp>
 

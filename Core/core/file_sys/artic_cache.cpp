@@ -2,7 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
-#include "artic_cache.h"
+#include "core/file_sys/artic_cache.h"
 
 namespace FileSys {
 ResultVal<std::size_t> ArticCache::Read(s32 file_handle, std::size_t offset, std::size_t length,

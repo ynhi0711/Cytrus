@@ -30,8 +30,8 @@ SERIALIZE_EXPORT_IMPL(Service::HTTP::SessionData)
 
 namespace Service::HTTP {
 
-#include "ctr-common-1-cert.h"
-#include "ctr-common-1-key.h"
+#include "core/hle/service/http/ctr-common-1-cert.h"
+#include "core/hle/service/http/ctr-common-1-key.h"
 
 namespace ErrCodes {
 enum {

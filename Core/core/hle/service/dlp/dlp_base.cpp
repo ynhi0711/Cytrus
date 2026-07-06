@@ -2,7 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
-#include "dlp_base.h"
+#include "core/hle/service/dlp/dlp_base.h"
 
 #include <cryptopp/aes.h>
 #include <cryptopp/modes.h>

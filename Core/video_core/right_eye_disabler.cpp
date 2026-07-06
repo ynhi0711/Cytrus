@@ -3,7 +3,7 @@
 // Refer to the license.txt file included.
 
 #include "common/settings.h"
-#include "right_eye_disabler.h"
+#include "video_core/right_eye_disabler.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_impl.h"
 

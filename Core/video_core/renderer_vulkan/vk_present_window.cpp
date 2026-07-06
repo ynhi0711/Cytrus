@@ -11,7 +11,6 @@
 #include "video_core/renderer_vulkan/vk_present_window.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
-#include "vk_platform.h"
 
 #include <vma/vk_mem_alloc.h>
 

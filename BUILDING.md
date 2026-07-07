@@ -138,7 +138,22 @@ NOTE for Phase 1 (adapter): this Cytrus version's custom-layout keys are
 `customTopLeft/Top/Right/Bottom`. Custom layout selection is via `layoutOption`
 (no separate `customLayout` bool key).
 
+**Device-gate lessons (2026-07-07):**
+- `UIFileSharingEnabled` has no `INFOPLIST_KEY_*` build setting — it silently drops; the
+  harness carries a real `Info.plist` merged with the generated one.
+- **The consuming app MUST embed MoltenVK.framework** — `allocate()` is
+  `dlopen("@rpath/MoltenVK.framework/MoltenVK")`; without it Vulkan init fails and (before
+  our patch) `insert:` null-deref'd. `fetch_dependencies.sh` now pulls the official
+  KhronosGroup **MoltenVK v1.4.1** xcframework into `Binaries/`; the harness embeds it
+  (CodeSignOnCopy). Delta note: it currently embeds MoltenVK **1.2.8** for the prebuilt
+  Citra — the self-built core should use the fetched 1.4.1.
+- Fork patches in `CytrusEmulator.mm`: `allocate()` logs `dlopen` failures;
+  `insert:` captures `Core::System::ResultStatus` from `system.Load(...)` and logs +
+  returns early on failure (upstream discarded it and crashed on the null GPU).
+  Failure codes: see `Core::System::ResultStatus` in `Core/include/core/core.h`
+  (3=SystemMode 4=Loader 5=Encrypted 6=InvalidFormat 8=SystemFiles …).
+
 ## Status
 - ✅ Library builds for `generic/platform=iOS` (Debug) — full core + wrapper.
-- ✅ CytrusHarness app links end-to-end (unsigned device build).
-- ⏳ Device gate: run the harness on hardware, boot SM3DL — renders + audio = go for Phase 1.
+- ✅ CytrusHarness app links end-to-end; MoltenVK 1.4.1 embedded.
+- ⏳ Device gate: run the harness on hardware, boot a title — renders + audio = go for Phase 1.

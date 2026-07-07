@@ -46,6 +46,17 @@ else
   echo "✓ Vulkan-Headers (cached)"
 fi
 
+if [ ! -d Binaries/MoltenVK.xcframework ]; then
+  echo "↓ MoltenVK v1.4.1 (runtime Vulkan ICD — allocate() dlopens @rpath/MoltenVK.framework)"
+  curl -sfL -o /tmp/MoltenVK-ios.tar \
+    "https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.1/MoltenVK-ios.tar"
+  tar -xf /tmp/MoltenVK-ios.tar -C /tmp MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework
+  mv /tmp/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework Binaries/
+  rm -rf /tmp/MoltenVK-ios.tar /tmp/MoltenVK
+else
+  echo "✓ MoltenVK (cached)"
+fi
+
 if [ ! -f Dependencies/vma/vma/vk_mem_alloc.h ]; then
   echo "↓ VulkanMemoryAllocator v3.1.0 (header-only)"
   mkdir -p Dependencies/vma/vma

@@ -65,7 +65,12 @@ static void TryShutdown() {
 }
 
 -(void) allocate {
-    library = std::make_shared<Common::DynamicLibrary>(dlopen("@rpath/MoltenVK.framework/MoltenVK", RTLD_NOW));
+    // xappify fork: name the failure instead of silently carrying a null handle into
+    // Vulkan init (the consuming app must EMBED MoltenVK.framework — see BUILDING.md).
+    void* handle = dlopen("@rpath/MoltenVK.framework/MoltenVK", RTLD_NOW);
+    if (!handle)
+        printf("[Cytrus] allocate: dlopen(MoltenVK) failed: %s\n", dlerror());
+    library = std::make_shared<Common::DynamicLibrary>(handle);
 }
 
 -(void) deallocate {
@@ -130,10 +135,22 @@ static void TryShutdown() {
     InputManager::Init();
     Network::Init();
     
+    // xappify fork: upstream discarded the Load result and then dereferenced
+    // system.GPU().Renderer() unconditionally — a failed Load (null GPU) crashed with
+    // EXC_BAD_ACCESS instead of reporting the reason (verified on device: missing
+    // MoltenVK → ErrorVideoCore-class failure → null-deref).
+    Core::System::ResultStatus load_result;
     if (auto bottom = bottom_window.get(); bottom) {
-        void(system.Load(*top_window, [url.path UTF8String], bottom));
+        load_result = system.Load(*top_window, [url.path UTF8String], bottom);
     } else
-        void(system.Load(*top_window, [url.path UTF8String]));
+        load_result = system.Load(*top_window, [url.path UTF8String]);
+
+    if (load_result != Core::System::ResultStatus::Success) {
+        LOG_CRITICAL(Frontend, "system.Load failed: {}", static_cast<u32>(load_result));
+        printf("[Cytrus] system.Load failed: %u\n", static_cast<u32>(load_result));
+        stop_run.store(true);
+        return;
+    }
     
     stop_run.store(false);
     pause_emulation.store(false);

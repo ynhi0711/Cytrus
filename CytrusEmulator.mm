@@ -149,6 +149,10 @@ static void TryShutdown() {
         LOG_CRITICAL(Frontend, "system.Load failed: {}", static_cast<u32>(load_result));
         printf("[Cytrus] system.Load failed: %u\n", static_cast<u32>(load_result));
         stop_run.store(true);
+        // Notify the frontend even on failure — otherwise the boot completion never fires and the
+        // app can't tell a failed boot from one still in progress (it would sit on a black screen).
+        if (callback)
+            callback();
         return;
     }
     
@@ -336,6 +340,12 @@ static void TryShutdown() {
 }
 
 -(void) orientationChanged:(UIInterfaceOrientation)orientation metalView:(UIView *)metalView secondary:(BOOL)secondary {
+    // If the system never booted (e.g. system.Load failed), the GPU was never constructed and
+    // GPU().Renderer() below would dereference a null unique_ptr → EXC_BAD_ACCESS. Bail out.
+    if (stop_run.load() || !Core::System::GetInstance().IsPoweredOn()) {
+        return;
+    }
+
     if (auto bottom = bottom_window.get(); secondary) {
         bottom_layer = (__bridge CA::MetalLayer*)metalView.layer;
         bottom_size = metalView.frame.size;

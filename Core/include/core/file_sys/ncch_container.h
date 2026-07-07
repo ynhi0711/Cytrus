@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -363,6 +364,14 @@ private:
     bool is_tainted = false; // Are there parts of this container being overridden?
     bool is_loaded = false;
     bool is_compressed = false;
+    bool is_encrypted = false;
+
+    // Keys and CTRs for on-the-fly NCCH decryption (restored from OG Citra; Azahar dropped this).
+    std::array<u8, 16> primary_key{};   // exheader / exefs headers / icon+banner
+    std::array<u8, 16> secondary_key{}; // .code section and romfs
+    std::array<u8, 16> exheader_ctr{};
+    std::array<u8, 16> exefs_ctr{};
+    std::array<u8, 16> romfs_ctr{};
 
     u32 ncch_offset = 0; // Offset to NCCH header, can be 0 for NCCHs or non-zero for CIAs/NCSDs
     u32 exefs_offset = 0;

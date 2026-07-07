@@ -67,32 +67,26 @@ static bool ValidateSaveState(const CSTHeader& header, SaveStateInfo& info, u64 
 
     if (revision == Common::g_scm_rev) {
         info.status = SaveStateInfo::ValidationStatus::OK;
-    } else {
-        if (!build_name.empty()) {
-            info.build_name = build_name;
-        } else if (hash_to_version.find(revision) != hash_to_version.end()) {
-            info.build_name = hash_to_version.at(revision);
-        }
-        if (info.build_name.empty()) {
-            LOG_WARNING(Core, "Save state file {} created from a different revision {}", path,
-                        revision);
-#if TARGET_OS_IOS
-            info.status = SaveStateInfo::ValidationStatus::OK;
-            return true;
-#endif
-        } else {
-            LOG_WARNING(Core,
-                        "Save state file {} created from a different build {} with revision {}",
-                        path, info.build_name, revision);
-#if TARGET_OS_IOS
-            info.status = SaveStateInfo::ValidationStatus::OK;
-            return true;
-#endif
-        }
-
-        info.status = SaveStateInfo::ValidationStatus::RevisionDismatch;
+        return true;
     }
-    return true;
+
+    // Different revision than this build. Determine a display name for the log, then REJECT.
+    // xappify fork: Delta hosts a single 3DS core id shared by the legacy prebuilt Citra and this
+    // self-built Cytrus, so a snapshot from another build/core reaches here with an incompatible
+    // serialized System layout. Deserializing it corrupts state (and a pre-migration prebuilt-Citra
+    // save previously aborted at the `revision == g_scm_rev` compare when g_scm_rev was null).
+    // Refuse before reading the body: System::LoadState throws "Invalid savestate", RunLoop catches
+    // it (ErrorSavestate), and the freshly-booted title keeps running. Cytrus's own saves match
+    // above (stable g_scm_rev) and are unaffected. Upstream instead force-accepted on iOS.
+    if (!build_name.empty()) {
+        info.build_name = build_name;
+    } else if (hash_to_version.find(revision) != hash_to_version.end()) {
+        info.build_name = hash_to_version.at(revision);
+    }
+    LOG_WARNING(Core, "Save state file {} is from a different revision {} (this build: {}); rejecting",
+                path, revision, Common::g_scm_rev);
+    info.status = SaveStateInfo::ValidationStatus::RevisionDismatch;
+    return false;
 }
 
 #if TARGET_OS_IOS

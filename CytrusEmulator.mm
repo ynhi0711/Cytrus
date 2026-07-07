@@ -208,8 +208,11 @@ static void TryShutdown() {
             running_cv.wait(pause_lock, [&] {
                 return !pause_emulation.load() || stop_run.load();
             });
-            
-            bottom_window->PollEvents(); // noop
+
+            // xappify fork: bottom_window is null in single-window setups (only top: set) —
+            // stop-while-paused crashed here with a null-deref (device-verified).
+            if (auto* bottom = bottom_window.get())
+                bottom->PollEvents(); // noop
         }
         
         dispatch_once(&onceToken, ^{

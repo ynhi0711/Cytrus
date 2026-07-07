@@ -151,6 +151,10 @@ NOTE for Phase 1 (adapter): this Cytrus version's custom-layout keys are
   prebuilt's rebranded `Documents/3DS/`. aes_keys.txt goes to `Documents/Cytrus/sysdata/`
   or every retail boot fails with `ErrorLoader_ErrorEncrypted` (5). Phase-1 adapter:
   `ThreeDSSettings` paths must switch accordingly for the Cytrus backend.
+- **Audio sinks need `HAVE_OPENAL` / `HAVE_COREAUDIO` defines** — `sink_details.cpp` only
+  registers sinks behind them; without any, every `outputType` silently falls back to the
+  Null sink (no sound, no error). SinkType enum: Auto0 Null1 Cubeb2 OpenAL3 SDL2-4 SDL3-5
+  CoreAudio6. The consuming app should also activate an `AVAudioSession` (.playback).
 - Fork patches in `CytrusEmulator.mm`: `allocate()` logs `dlopen` failures;
   `insert:` captures `Core::System::ResultStatus` from `system.Load(...)` and logs +
   returns early on failure (upstream discarded it and crashed on the null GPU).

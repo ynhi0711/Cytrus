@@ -11,6 +11,7 @@
 //  enabled), then tap Boot. aes_keys.txt installs automatically from the bundle.
 //
 
+import AVFAudio
 import MetalKit
 import UIKit
 
@@ -94,6 +95,16 @@ final class HarnessViewController: UIViewController {
 
         installAESKeys()
         HarnessConfig.seed()
+
+        // The audio sink outputs into the app's audio session — activate it for playback
+        // (the main app's DeltaCore does this; without it, output can be silent/ducked).
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+            try AVAudioSession.sharedInstance().setActive(true)
+            log("audio session active")
+        } catch {
+            log("audio session failed: \(error.localizedDescription)")
+        }
 
         log("allocate()")
         core.allocate()

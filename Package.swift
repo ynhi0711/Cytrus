@@ -136,6 +136,12 @@ var cytrusCXXSettings: [CXXSetting] = [
     // Embedding SDL: without this, SDL_main.h injects a main() into every includer
     // (duplicate _main at link between sdl3_sink.o and EmulationWindow_Vulkan.o).
     .define("SDL_MAIN_HANDLED"),
+    // Audio sinks register in sink_details.cpp ONLY behind these — without them just the
+    // Null sink exists and every outputType silently falls back to silence
+    // (device-verified). OpenAL = prebuilt parity (outputType 3); CoreAudio (6) is the
+    // native fallback this tree ships.
+    .define("HAVE_OPENAL"),
+    .define("HAVE_COREAUDIO"),
 ]
 cytrusCXXSettings.append(contentsOf: vendoredIncludes)
 
@@ -148,6 +154,8 @@ let cytrusLinkerSettings: [LinkerSetting] = [
     .linkedFramework("AudioToolbox"),
     .linkedFramework("CoreMedia"),  // camera wrapper (CMSampleBuffer)
     .linkedFramework("CoreMotion"), // InputManager motion (CMMotionManager)
+    .linkedFramework("CoreAudio"),  // coreaudio_sink.mm
+    .linkedFramework("AVFAudio"),   // AVAudioSession (audio session activation)
     .linkedLibrary("z"),
     .linkedLibrary("bz2"),
 ]

@@ -151,13 +151,14 @@ final class HarnessViewController: UIViewController {
         return contents.first { ["3ds", "cci", "cxi", "app"].contains($0.pathExtension.lowercased()) }
     }
 
-    /// Same FileUtil layout as the prebuilt: keys must be at Documents/3DS/sysdata before
-    /// the core's HW::AES::InitKeys latches them (once per process).
+    /// This fork's iOS user dir is Documents/Cytrus (EMU_APPLE_DATA_DIR in
+    /// common_paths.h — "Documents/3DS" was ManicEMU's rebrand in the prebuilt). Keys must
+    /// be in place before the core's HW::AES::InitKeys latches them (once per process).
     private func installAESKeys() {
         guard let bundled = Bundle.main.url(forResource: "aes_keys", withExtension: "txt") else {
             return log("aes_keys.txt missing from bundle")
         }
-        let sysdata = documentsURL.appendingPathComponent("3DS/sysdata", isDirectory: true)
+        let sysdata = documentsURL.appendingPathComponent("Cytrus/sysdata", isDirectory: true)
         let target = sysdata.appendingPathComponent("aes_keys.txt")
         do {
             try FileManager.default.createDirectory(at: sysdata, withIntermediateDirectories: true)

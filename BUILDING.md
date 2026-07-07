@@ -147,6 +147,10 @@ NOTE for Phase 1 (adapter): this Cytrus version's custom-layout keys are
   KhronosGroup **MoltenVK v1.4.1** xcframework into `Binaries/`; the harness embeds it
   (CodeSignOnCopy). Delta note: it currently embeds MoltenVK **1.2.8** for the prebuilt
   Citra — the self-built core should use the fetched 1.4.1.
+- **iOS user dir is `Documents/Cytrus/`** (`EMU_APPLE_DATA_DIR`, common_paths.h) — NOT the
+  prebuilt's rebranded `Documents/3DS/`. aes_keys.txt goes to `Documents/Cytrus/sysdata/`
+  or every retail boot fails with `ErrorLoader_ErrorEncrypted` (5). Phase-1 adapter:
+  `ThreeDSSettings` paths must switch accordingly for the Cytrus backend.
 - Fork patches in `CytrusEmulator.mm`: `allocate()` logs `dlopen` failures;
   `insert:` captures `Core::System::ResultStatus` from `system.Load(...)` and logs +
   returns early on failure (upstream discarded it and crashed on the null GPU).

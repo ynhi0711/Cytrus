@@ -146,10 +146,17 @@ namespace {
             auto title = Title(data);
             
             auto icon = Icon(data);
-            
+
+            // xappify fork: both loader results are std::optional and upstream misused them —
+            // `LoadKernelMemoryMode().first || 0` ORs the OPTIONAL's bool (memMode was always
+            // 0/1), and `LoadNew3dsHwCapabilities().first->memory_mode` dereferences an EMPTY
+            // optional for old-3DS-only titles (SIGABRT on device — e.g. Super Mario 3D Land).
+            const auto kernel_memory_mode = app_loader->LoadKernelMemoryMode().first;
+            const auto n3ds_capabilities = app_loader->LoadNew3dsHwCapabilities().first;
+
             _information = [[CytrusGameInformation alloc] initWithIdentifier:program_id
-                                                            kernelMemoryMode:(CytrusKernelMemoryMode)(app_loader->LoadKernelMemoryMode().first || 0)
-                                                      new3DSKernelMemoryMode:(CytrusNew3DSKernelMemoryMode)(app_loader->LoadNew3dsHwCapabilities().first->memory_mode)
+                                                            kernelMemoryMode:(CytrusKernelMemoryMode)(kernel_memory_mode.has_value() ? static_cast<uint8_t>(*kernel_memory_mode) : 0)
+                                                      new3DSKernelMemoryMode:(CytrusNew3DSKernelMemoryMode)(n3ds_capabilities.has_value() ? static_cast<uint8_t>(n3ds_capabilities->memory_mode) : 0)
                                                                    publisher:nsStringFromCharacters(publisher.c_str())
                                                                      regions:nsString(regions.c_str())
                                                                        title:nsStringFromCharacters(title.c_str())

@@ -119,6 +119,26 @@ Build command (from this directory):
   CheatsManager.h, GameInformationManager.h, MultiplayerManager.h, CytrusTypes.h — so
   `import Cytrus` / `canImport(Cytrus)` works from Swift.
 
+- **App-link additions**: xxhash + lodepng compiled from vendored source; CoreMedia +
+  CoreMotion linked (camera wrapper / motion input). Undefined-symbol errors only surface
+  when an APP links the library — the library target alone won't show them.
+
+## CytrusHarness (device gate app)
+
+`CytrusHarness/CytrusHarness.xcodeproj` — minimal UIKit app consuming this package.
+Boot flow mirrors the main app's bridge: seed `cytrus.v1.38.*` defaults
+(`HarnessConfig.seed()` — registers `""` for webAPIURL/ppShaderName/anaglyphShaderName,
+which the wrapper reads WITHOUT nil guards) → install bundled `aes_keys.txt` to
+`Documents/3DS/sysdata/` → `allocate()` → `top(layer,size:)` → +1s → detached-thread
+`insert(from:)` with the first `.3ds` found in Documents (file sharing enabled — drop the
+ROM in via the Files app). Signing: team 6XVY5G3U44, bundle id `com.xappify.CytrusHarness`.
+
+NOTE for Phase 1 (adapter): this Cytrus version's custom-layout keys are
+`customTop{X,Y,Width,Height}` / `customBottom{X,Y,Width,Height}` — NOT the prebuilt's
+`customTopLeft/Top/Right/Bottom`. Custom layout selection is via `layoutOption`
+(no separate `customLayout` bool key).
+
 ## Status
 - ✅ Library builds for `generic/platform=iOS` (Debug) — full core + wrapper.
-- ⏳ Next: device harness app (boot a title on hardware), then app integration (Phase 1).
+- ✅ CytrusHarness app links end-to-end (unsigned device build).
+- ⏳ Device gate: run the harness on hardware, boot SM3DL — renders + audio = go for Phase 1.

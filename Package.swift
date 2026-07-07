@@ -43,7 +43,7 @@ cytrusDependencies.append(.target(name: "inih"))
 let cytrusExcludes: [String] = [
     // Non-source / metadata
     "BUILDING.md", "LICENSE.md", "README.md", "fetch_dependencies.sh",
-    "SharedDependencies/Package.swift", "SharedDependencies/README.md",
+    "SharedDependencies/Package.swift",
     // Folium's Swift sugar — the app's CytrusAdapter talks ObjC directly.
     "Cytrus.swift",
     // Multiplayer impl depends on Swift types from Cytrus.swift (Cytrus-Swift.h) and is
@@ -77,6 +77,9 @@ let cytrusSources: [String] = [
     "InputManager",
     "Managers",
     "SoftwareKeyboard",
+    // Vendored libs referenced by the core at link time.
+    "SharedDependencies/Sources/xxhash",
+    "SharedDependencies/Sources/lodepng",
     // zstd from source (lib + seekable_format contrib) — not in the prebuilt set.
     "Dependencies/zstd/lib/common",
     "Dependencies/zstd/lib/compress",
@@ -89,6 +92,7 @@ let cytrusCSettings: [CSetting] = [
     // per-language — keep both blocks in sync where it matters.
     .headerSearchPath("Dependencies/zstd/lib"),
     .headerSearchPath("Dependencies/zstd/contrib"),
+    .headerSearchPath("SharedDependencies/Sources/xxhash/include"),
     .define("ZSTD_STATIC_LINKING_ONLY"), // internal zstd + seekable contrib API
 ]
 
@@ -142,6 +146,8 @@ let cytrusLinkerSettings: [LinkerSetting] = [
     .linkedFramework("UIKit"),
     .linkedFramework("AVFoundation"),
     .linkedFramework("AudioToolbox"),
+    .linkedFramework("CoreMedia"),  // camera wrapper (CMSampleBuffer)
+    .linkedFramework("CoreMotion"), // InputManager motion (CMMotionManager)
     .linkedLibrary("z"),
     .linkedLibrary("bz2"),
 ]

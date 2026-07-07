@@ -106,6 +106,10 @@ NS_ASSUME_NONNULL_BEGIN
 -(uint16_t) stepsPerHour;
 -(void) setStepsPerHour:(uint16_t)stepsPerHour;
 
+// xappify fork additions (the ManicEMU prebuilt exposed both; the app's pause menu needs them)
+-(void) reset;                              // Restart Game — thread-safe RequestReset
+-(void) setFrameLimit:(uint16_t)limit NS_SWIFT_NAME(setFrameLimit(_:)); // Fast Forward — percent (100 = normal)
+
 -(BOOL) loadState;
 -(BOOL) saveState;
 

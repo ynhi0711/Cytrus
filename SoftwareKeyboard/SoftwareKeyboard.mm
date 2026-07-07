@@ -38,7 +38,9 @@ void Keyboard::ShowError(const std::string& error) {
 void Keyboard::KeyboardText(std::condition_variable& cv) {
     [[NSNotificationCenter defaultCenter] addObserverForName:@"closeKeyboard" object:NULL queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *notification) {
-        this->buttonPressed = (NSUInteger)notification.userInfo[@"buttonPressed"];
+        // xappify fork: unbox the NSNumber — upstream cast the object POINTER to an integer,
+        // so every reply looked like a garbage button index.
+        this->buttonPressed = [notification.userInfo[@"buttonPressed"] unsignedIntegerValue];
         
         NSString *_Nullable text = notification.userInfo[@"keyboardText"];
         if (text != NULL)

@@ -538,6 +538,17 @@ static void TryShutdown() {
     Settings::values.steps_per_hour = stepsPerHour;
 }
 
+// xappify fork additions — see CytrusEmulator.h.
+-(void) reset {
+    if (![self running])
+        return;
+    Core::System::GetInstance().RequestReset();
+}
+
+-(void) setFrameLimit:(uint16_t)limit {
+    Settings::values.frame_limit.SetValue(static_cast<double>(limit));
+}
+
 -(BOOL) loadState {
     if (![self running])
         return FALSE;

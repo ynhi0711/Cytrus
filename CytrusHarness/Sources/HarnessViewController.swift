@@ -128,7 +128,26 @@ final class HarnessViewController: UIViewController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
             guard let self else { return }
             self.log("@8s running=\(self.core.running()) paused=\(self.core.isPaused())")
+            self.dumpCoreLog(grepping: "Sink|sink|Audio|audio")
         }
+    }
+
+    /// The core logs to Documents/Cytrus/log/cytrus_log.txt (never the console) — dump the
+    /// lines that matter so sink selection / audio errors are visible in Xcode.
+    private func dumpCoreLog(grepping pattern: String? = nil) {
+        let logURL = documentsURL.appendingPathComponent("Cytrus/log/cytrus_log.txt")
+        guard let text = try? String(contentsOf: logURL, encoding: .utf8) else {
+            return log("no core log at Cytrus/log/cytrus_log.txt")
+        }
+        var lines = text.split(separator: "\n").map(String.init)
+        if let pattern, let regex = try? NSRegularExpression(pattern: pattern) {
+            lines = lines.filter {
+                regex.firstMatch(in: $0, range: NSRange($0.startIndex..., in: $0)) != nil
+            }
+        }
+        print("[harness] --- core log (\(lines.count) matching lines) ---")
+        lines.suffix(30).forEach { print("[cytrus_log] \($0)") }
+        print("[harness] --- end core log ---")
     }
 
     @objc private func pauseTapped() {
@@ -143,6 +162,9 @@ final class HarnessViewController: UIViewController {
         log("stop()")
         core.stop()
         log("stopped=\(core.stopped())")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.dumpCoreLog(grepping: "Sink|sink|Audio|audio|error|Error|Critical")
+        }
     }
     #else
     @objc private func bootTapped() { log("Cytrus module not linked") }

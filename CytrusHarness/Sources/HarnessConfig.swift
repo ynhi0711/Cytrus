@@ -70,14 +70,15 @@ enum HarnessConfig {
             "customTextures": false,
             "preloadTextures": false,
             "asyncCustomLoading": false,
-            // Audio — outputType 3 = OpenAL playback (same as the prebuilt profile);
+            // Audio — outputType 6 = the native CoreAudio RemoteIO sink (this tree's
+            // reliable iOS backend; the prebuilt lib_openal static lib produced silence).
             // inputType 1 = Null mic (Cubeb unavailable → OpenAL capture crashes).
             "audioMuted": false,
             "audioEmulation": 0,
             "audioStretching": false,
             "realtimeAudio": true,
             "volume": 1.0,
-            "outputType": 3,
+            "outputType": 6,
             "inputType": 1,
             // Logging — verbose so boot failures name themselves in the console.
             "logLevel": 0,

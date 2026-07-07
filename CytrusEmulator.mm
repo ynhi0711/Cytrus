@@ -473,6 +473,19 @@ static void TryShutdown() {
     Settings::values.custom_bottom_width.SetValue(unsigned16(@"cytrus.v1.38.customBottomWidth"));
     Settings::values.custom_bottom_height.SetValue(unsigned16(@"cytrus.v1.38.customBottomHeight"));
     Settings::values.custom_second_layer_opacity.SetValue(unsigned16(@"cytrus.v1.38.customSecondLayerOpacity"));
+    // xappify fork: portrait windows use a SEPARATE layout selector + rect set
+    // (CustomFrameLayout reads custom_portrait_* when is_portrait) — upstream never
+    // exposed them, so portrait was stuck on PortraitTopFullWidth.
+    Settings::values.portrait_layout_option.SetValue(
+        static_cast<Settings::PortraitLayoutOption>(unsigned32(@"cytrus.v1.38.portraitLayoutOption")));
+    Settings::values.custom_portrait_top_x.SetValue(unsigned16(@"cytrus.v1.38.customPortraitTopX"));
+    Settings::values.custom_portrait_top_y.SetValue(unsigned16(@"cytrus.v1.38.customPortraitTopY"));
+    Settings::values.custom_portrait_top_width.SetValue(unsigned16(@"cytrus.v1.38.customPortraitTopWidth"));
+    Settings::values.custom_portrait_top_height.SetValue(unsigned16(@"cytrus.v1.38.customPortraitTopHeight"));
+    Settings::values.custom_portrait_bottom_x.SetValue(unsigned16(@"cytrus.v1.38.customPortraitBottomX"));
+    Settings::values.custom_portrait_bottom_y.SetValue(unsigned16(@"cytrus.v1.38.customPortraitBottomY"));
+    Settings::values.custom_portrait_bottom_width.SetValue(unsigned16(@"cytrus.v1.38.customPortraitBottomWidth"));
+    Settings::values.custom_portrait_bottom_height.SetValue(unsigned16(@"cytrus.v1.38.customPortraitBottomHeight"));
     Settings::values.aspect_ratio.SetValue(static_cast<Settings::AspectRatio>(unsigned32(@"cytrus.v1.38.aspectRatio")));
     Settings::values.render_3d.SetValue(static_cast<Settings::StereoRenderOption>(unsigned32(@"cytrus.v1.38.render3D")));
     Settings::values.factor_3d.SetValue(unsigned32(@"cytrus.v1.38.factor3D"));

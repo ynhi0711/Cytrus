@@ -69,12 +69,21 @@ public:
         return present_ready[image_index];
     }
 
+    /// Returns true if the present mode implied by current settings (vsync / frame limit) differs
+    /// from the active one — e.g. after toggling fast-forward. The caller should recreate the
+    /// swapchain so the new mode takes effect. Cheap: uses cached device capabilities.
+    [[nodiscard]] bool NeedsPresentModeUpdate() const;
+
 private:
     /// Selects the best available swapchain image format
     void FindPresentFormat();
 
     /// Sets the best available present mode
     void SetPresentMode();
+
+    /// Computes the present mode implied by current settings and cached device capabilities,
+    /// without querying the device or mutating state.
+    [[nodiscard]] vk::PresentModeKHR DesiredPresentMode() const;
 
     /// Sets the surface properties according to device capabilities
     void SetSurfaceProperties();
@@ -107,6 +116,10 @@ private:
     u32 frame_index = 0;
     bool needs_recreation = true;
     bool low_refresh_rate;
+    // Device present-mode availability, cached by SetPresentMode() so NeedsPresentModeUpdate()
+    // can recompute the desired mode without re-querying the surface every frame.
+    bool supports_immediate = false;
+    bool supports_mailbox = false;
 };
 
 } // namespace Vulkan

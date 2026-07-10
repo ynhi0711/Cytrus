@@ -161,7 +161,6 @@ void Swapchain::FindPresentFormat() {
 
 void Swapchain::SetPresentMode() {
     const auto modes = instance.GetPhysicalDevice().getSurfacePresentModesKHR(surface);
-    const bool use_vsync = Settings::values.use_vsync.GetValue();
     const auto find_mode = [&modes](vk::PresentModeKHR requested) {
         const auto it =
             std::find_if(modes.begin(), modes.end(),
@@ -170,36 +169,50 @@ void Swapchain::SetPresentMode() {
         return it != modes.end();
     };
 
-    present_mode = vk::PresentModeKHR::eFifo;
-    const bool has_immediate = find_mode(vk::PresentModeKHR::eImmediate);
-    const bool has_mailbox = find_mode(vk::PresentModeKHR::eMailbox);
-    if (!has_immediate && !has_mailbox) {
+    // Cache device capabilities so DesiredPresentMode()/NeedsPresentModeUpdate() can recompute the
+    // target mode (e.g. after a runtime fast-forward toggle) without re-querying the surface.
+    supports_immediate = find_mode(vk::PresentModeKHR::eImmediate);
+    supports_mailbox = find_mode(vk::PresentModeKHR::eMailbox);
+
+    present_mode = DesiredPresentMode();
+
+    if (!supports_immediate && !supports_mailbox) {
         LOG_WARNING(Render_Vulkan, "Forcing Fifo present mode as no alternatives are available");
-        return;
+    } else if (Settings::values.use_vsync.GetValue() &&
+               present_mode == vk::PresentModeKHR::eImmediate) {
+        // Vsync requested but mailbox is unavailable, so a speedup/slowdown falls back to
+        // immediate — no vblank sync means tearing.
+        LOG_WARNING(Render_Vulkan,
+                    "Vsync enabled while frame limiting and no mailbox support, expect tearing");
     }
+}
+
+vk::PresentModeKHR Swapchain::DesiredPresentMode() const {
+    if (!supports_immediate && !supports_mailbox) {
+        return vk::PresentModeKHR::eFifo;
+    }
+
+    const bool use_vsync = Settings::values.use_vsync.GetValue();
 
     // If the user has disabled vsync use immediate mode for the least latency.
     // This may have screen tearing.
     if (!use_vsync) {
-        present_mode =
-            has_immediate ? vk::PresentModeKHR::eImmediate : vk::PresentModeKHR::eMailbox;
-        return;
+        return supports_immediate ? vk::PresentModeKHR::eImmediate : vk::PresentModeKHR::eMailbox;
     }
 
     const auto frame_limit = Settings::GetFrameLimit();
 
     // If vsync is enabled attempt to use mailbox mode in case the user wants to speedup/slowdown
-    // the game. If mailbox is not available use immediate and warn about it.
-    if (use_vsync &&
-        (frame_limit > 100 || frame_limit == 0 || low_refresh_rate)) { // 0 = unthrottled
-        present_mode = has_mailbox ? vk::PresentModeKHR::eMailbox : vk::PresentModeKHR::eImmediate;
-        if (!has_mailbox) {
-            LOG_WARNING(
-                Render_Vulkan,
-                "Vsync enabled while frame limiting and no mailbox support, expect tearing");
-        }
-        return;
+    // the game (e.g. fast-forward). If mailbox is not available use immediate.
+    if (frame_limit > 100 || frame_limit == 0 || low_refresh_rate) { // 0 = unthrottled
+        return supports_mailbox ? vk::PresentModeKHR::eMailbox : vk::PresentModeKHR::eImmediate;
     }
+
+    return vk::PresentModeKHR::eFifo;
+}
+
+bool Swapchain::NeedsPresentModeUpdate() const {
+    return DesiredPresentMode() != present_mode;
 }
 
 void Swapchain::SetSurfaceProperties() {

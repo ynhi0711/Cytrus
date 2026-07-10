@@ -349,15 +349,22 @@ static void TryShutdown() {
     if (auto bottom = bottom_window.get(); secondary) {
         bottom_layer = (__bridge CA::MetalLayer*)metalView.layer;
         bottom_size = metalView.frame.size;
-        
-        bottom->SizeChanged(metalView.frame.size);
-        // bottom->OrientationChanged(orientation, (__bridge CA::MetalLayer*)metalView.layer);
+
+        if (bottom) {
+            bottom->SizeChanged(metalView.frame.size);
+            bottom->OrientationChanged(orientation, (__bridge CA::MetalLayer*)metalView.layer);
+        }
     } else {
         top_layer = (__bridge CA::MetalLayer*)metalView.layer;
         top_size = metalView.frame.size;
-        
+
         top_window->SizeChanged(metalView.frame.size);
-        // top_window->OrientationChanged(orientation, (__bridge CA::MetalLayer*)metalView.layer);
+        // xappify fork: honor the real device orientation. is_portrait is fixed at the window's
+        // constructor default (true for non-SeparateWindows) and only OrientationChanged updates it;
+        // calling it here (instead of SizeChanged alone) sets is_portrait from the current
+        // orientation and re-runs the framebuffer layout, so the custom rects place BOTH screens
+        // correctly in landscape/rotation as well as portrait.
+        top_window->OrientationChanged(orientation, (__bridge CA::MetalLayer*)metalView.layer);
     }
     
     Core::System::GetInstance().GPU().Renderer().NotifySurfaceChanged(secondary);

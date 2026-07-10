@@ -363,7 +363,10 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
     const bool size_changed =
         swapchain.GetWidth() != frame->width || swapchain.GetHeight() != frame->height;
     const bool vsync_changed = vsync_enabled != use_vsync;
-    if (vsync_changed || size_changed) [[unlikely]] {
+    // A runtime frame-limit change (e.g. toggling fast-forward) can flip the desired present mode
+    // between FIFO and Mailbox/Immediate; recreate so the emulation loop unlocks past vblank.
+    const bool present_mode_changed = swapchain.NeedsPresentModeUpdate();
+    if (vsync_changed || size_changed || present_mode_changed) [[unlikely]] {
         vsync_enabled = use_vsync;
         recreate_swapchain();
     }

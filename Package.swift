@@ -94,6 +94,13 @@ let cytrusCSettings: [CSetting] = [
     .headerSearchPath("Dependencies/zstd/contrib"),
     .headerSearchPath("SharedDependencies/Sources/xxhash/include"),
     .define("ZSTD_STATIC_LINKING_ONLY"), // internal zstd + seekable contrib API
+    // Force optimization on the from-source core REGARDLESS of the app's build config.
+    // A SwiftPM source target otherwise inherits the consuming app's config — a Debug app
+    // build would compile this whole 3DS interpreter/GPU core at -O0, 3-10x slower than the
+    // prebuilt Citra.framework it replaced (which was always release-optimized). SPM appends
+    // target flags AFTER the config's -O0/-Os, so this -O2 wins. -O2 (not -O3) keeps UB risk
+    // low; step to -O3 only after re-testing. Allowed here because this is a local path package.
+    .unsafeFlags(["-O2"]),
 ]
 
 var cytrusCXXSettings: [CXXSetting] = [
@@ -142,6 +149,9 @@ var cytrusCXXSettings: [CXXSetting] = [
     // native fallback this tree ships.
     .define("HAVE_OPENAL"),
     .define("HAVE_COREAUDIO"),
+    // Optimize the C++/ObjC++ core unconditionally — see the note on cytrusCSettings above.
+    // This is the primary perf fix: it lifts a Debug app build's core from -O0 to -O2.
+    .unsafeFlags(["-O2"]),
 ]
 cytrusCXXSettings.append(contentsOf: vendoredIncludes)
 
@@ -173,6 +183,9 @@ let cryptoppTarget: Target = .target(
         // (NEON paths unaffected); CRC32 falls back to the table implementation.
         .define("CRYPTOPP_DISABLE_ARM_CRC32"),
         .define("CRYPTOPP_DISABLE_ARM_PMULL"),
+        // Optimize regardless of app config — cryptopp does AES/SHA work on the boot/decrypt
+        // path. See the note on cytrusCSettings.
+        .unsafeFlags(["-O2"]),
     ]
 )
 
@@ -180,8 +193,8 @@ let inihTarget: Target = .target(
     name: "inih",
     path: "SharedDependencies/Sources/inih",
     publicHeadersPath: "include",
-    cSettings: [.headerSearchPath("include/inih")],
-    cxxSettings: [.headerSearchPath("include/inih")]
+    cSettings: [.headerSearchPath("include/inih"), .unsafeFlags(["-O2"])],
+    cxxSettings: [.headerSearchPath("include/inih"), .unsafeFlags(["-O2"])]
 )
 
 let cytrusTarget: Target = .target(

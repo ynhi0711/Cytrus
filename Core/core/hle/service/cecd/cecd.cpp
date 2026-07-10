@@ -115,7 +115,8 @@ void Module::Interface::Open(Kernel::HLERequestContext& ctx) {
             rb.Push<u32>(static_cast<u32>(session_data->file->GetSize())); // Return file size
         }
 
-        if (path_type == CecDataPathType::MboxProgramId) {
+        // Only if the file actually opened above — the failed-open path leaves `file` null.
+        if (path_type == CecDataPathType::MboxProgramId && session_data->file) {
             std::vector<u8> program_id(8);
             u64_le le_program_id = cecd->system.Kernel().GetCurrentProcess()->codeset->program_id;
             std::memcpy(program_id.data(), &le_program_id, sizeof(u64));
@@ -159,6 +160,14 @@ void Module::Interface::Read(Kernel::HLERequestContext& ctx) {
         rb.Push<u32>(0); // No bytes read
         break;
     default: // If not directory, then it is a file
+        // A preceding Open may have failed (e.g. missing CEC NAND archive after an auto-resume with a
+        // stale savestate path), leaving `file` null. Fail gracefully instead of dereferencing null.
+        if (!session_data->file) {
+            rb.Push(Result(ErrorDescription::NoData, ErrorModule::CEC, ErrorSummary::NotFound,
+                           ErrorLevel::Status));
+            rb.Push<u32>(0); // No bytes read
+            break;
+        }
         std::vector<u8> buffer(write_buffer_size);
         const u32 bytes_read = static_cast<u32>(
             session_data->file->Read(0, write_buffer_size, buffer.data()).Unwrap());
@@ -363,6 +372,12 @@ void Module::Interface::Write(Kernel::HLERequestContext& ctx) {
                        ErrorLevel::Status));
         break;
     default: // If not directory, then it is a file
+        // As in Read: a failed Open leaves `file` null; don't dereference it.
+        if (!session_data->file) {
+            rb.Push(Result(ErrorDescription::NoData, ErrorModule::CEC, ErrorSummary::NotFound,
+                           ErrorLevel::Status));
+            break;
+        }
         std::vector<u8> buffer(read_buffer_size);
         read_buffer.Read(buffer.data(), 0, read_buffer_size);
 

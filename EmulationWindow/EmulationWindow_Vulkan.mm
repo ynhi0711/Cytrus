@@ -102,9 +102,18 @@ void EmulationWindow_Vulkan::TryPresenting() {};
 
 
 void EmulationWindow_Vulkan::OnFramebufferSizeChanged() {
-    auto bigger{window_width > window_height ? window_width : window_height};
-    auto smaller{window_width < window_height ? window_width : window_height};
-    
+    // xappify fork: window_width/height arrive in POINTS, but the custom-layout screen rects
+    // (Settings::custom_top_*/custom_bottom_* and their portrait variants) are written in PIXELS,
+    // and the framebuffer layout's width/height are taken verbatim as the Vulkan swapchain extent.
+    // Scale to pixels here so the rects land INSIDE the framebuffer (otherwise the bottom screen's
+    // pixel Y overflows the point-sized framebuffer and is clipped — only the top screen renders).
+    // This also makes the touch-ratio math (framebuffer.width / (window_width * nativeScale)) ~1.
+    const float scale = [[UIScreen mainScreen] nativeScale];
+    const int px_width = static_cast<int>(window_width * scale);
+    const int px_height = static_cast<int>(window_height * scale);
+    auto bigger{px_width > px_height ? px_width : px_height};
+    auto smaller{px_width < px_height ? px_width : px_height};
+
     UpdateCurrentFramebufferLayout(is_portrait ? smaller : bigger, is_portrait ? bigger : smaller, is_portrait);
 };
 

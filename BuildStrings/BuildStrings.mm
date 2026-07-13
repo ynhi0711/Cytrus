@@ -23,7 +23,17 @@
 // SHA) so every Cytrus savestate embeds the same revision and validates as current across app
 // updates. savestate.cpp hex-decodes this into the 20-byte CSTHeader.revision, so it MUST be
 // exactly 40 hex characters.
-static const char* const kCytrusFallbackRevision = "c17c05c0dec0ffee0000000000000000deadbeef";
+//
+// This ALSO doubles as the SAVESTATE-LAYOUT VERSION. ValidateSaveState (savestate.cpp) only rejects
+// a save when its embedded revision != this value; since every Cytrus build shares this constant, a
+// savestate written by an OLDER build with a DIFFERENT serialized System/GPU/Pica/kernel layout
+// otherwise passes validation and then ABORTS in the boost deserialize (misaligned stream →
+// `basic_binary_iprimitive::load` assert). The abort is not catchable, so validation-before-load is
+// the only safe guard. Therefore: BUMP the middle version field below (…0000000000000001…) whenever
+// you change anything in the serialized state graph. Stale saves then fail validation and are
+// rejected (LoadState throws "Invalid savestate", RunLoop catches it, the title boots fresh) instead
+// of crashing. v1: 2026-07 — first bump; establishes a clean baseline after the boot-path work.
+static const char* const kCytrusFallbackRevision = "c17c05c0dec0ffee0000000000000001deadbeef";
 
 const char* gitDate(void) {
     NSDate *date = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"GIT_DATE"];

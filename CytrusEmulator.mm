@@ -195,7 +195,11 @@ static void TryShutdown() {
         }
     };
     
-    static dispatch_once_t onceToken;
+    // xappify fork: fire the boot-completion callback once PER BOOT. The previous
+    // `static dispatch_once_t` only fired once per PROCESS, so resume (2nd+) boots never
+    // notified the frontend — leaving input/orientation unbound and auto-resume untriggered.
+    // A local bool resets on every insert: call, so the callback fires on every boot.
+    bool boot_callback_fired = false;
     while (!stop_run.load()) {
         if (!pause_emulation.load()) {
             void(system.RunLoop());
@@ -219,9 +223,10 @@ static void TryShutdown() {
                 bottom->PollEvents(); // noop
         }
         
-        dispatch_once(&onceToken, ^{
+        if (!boot_callback_fired) {
+            boot_callback_fired = true;
             callback();
-        });
+        }
     }
     
     Network::Shutdown();

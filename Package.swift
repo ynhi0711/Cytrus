@@ -130,6 +130,12 @@ var cytrusCXXSettings: [CXXSetting] = [
     .headerSearchPath("Dependencies/zstd/contrib"),
     // Citra-lineage arch define (aarch64 JIT/shader paths key off it).
     .define("ARCHITECTURE_arm64"),
+    // Route BOOST_ASSERT through our throwing handler (Core/core/boost_assert_handler.cpp)
+    // instead of assert()->abort(). The asserts we hit are inside binary_iarchive save-state
+    // deserialization (e.g. the GeometryEmitter bool trap on a stale/corrupt save); abort() is
+    // uncatchable, but RunLoop wraps LoadState in try/catch(std::exception), so throwing lets
+    // that ErrorSavestate recovery run instead of killing the app.
+    .define("BOOST_ENABLE_ASSERT_HANDLER"),
     // iOS renders via Vulkan→MoltenVK only (settings.h #errors without one).
     .define("ENABLE_VULKAN"),
     .define("ZSTD_STATIC_LINKING_ONLY"), // zstd_compression.cpp uses advanced API

@@ -33,7 +33,10 @@
 // you change anything in the serialized state graph. Stale saves then fail validation and are
 // rejected (LoadState throws "Invalid savestate", RunLoop catches it, the title boots fresh) instead
 // of crashing. v1: 2026-07 — first bump; establishes a clean baseline after the boot-path work.
-static const char* const kCytrusFallbackRevision = "c17c05c0dec0ffee0000000000000001deadbeef";
+// v2: 2026-07 — serialized System/GPU/Pica layout drifted from v1 builds; an old-build resume save
+// aborted in boost deserialize (GeometryEmitter bool trap, basic_binary_iprimitive.hpp:105). Bump to
+// reject stale v1 saves at validation so the freshly-booted title keeps running instead of crashing.
+static const char* const kCytrusFallbackRevision = "c17c05c0dec0ffee0000000000000002deadbeef";
 
 const char* gitDate(void) {
     NSDate *date = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"GIT_DATE"];

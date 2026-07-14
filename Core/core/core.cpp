@@ -431,6 +431,11 @@ System::ResultStatus System::Load(Frontend::EmuWindow& emu_window, const std::st
     const Loader::ResultStatus load_result{app_loader->Load(process)};
     if (Loader::ResultStatus::Success != load_result) {
         LOG_CRITICAL(Core, "Failed to load ROM (Error {})!", load_result);
+        // Release the partially-created process while the kernel and memory subsystems
+        // are still alive. Shutdown() resets kernel then memory, and ~Process calls
+        // kernel.memory.UnregisterPageTable() — holding this ref past Shutdown()
+        // dereferences freed subsystems (EXC_BAD_ACCESS).
+        process.reset();
         System::Shutdown();
 
         switch (load_result) {

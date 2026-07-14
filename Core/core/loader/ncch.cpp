@@ -160,6 +160,19 @@ ResultStatus AppLoader_NCCH::LoadExec(std::shared_ptr<Kernel::Process>& process)
             return ResultStatus::ErrorGbaTitle;
         }
 
+        // xappify fork: a corrupt/undecryptable exheader yields an out-of-range resource
+        // limit category (valid range 0-3). GetForCategory() would UNREACHABLE_MSG and hard
+        // -trap the entire app. Reject the load before any process is created, so
+        // CytrusEmulator.mm's existing failure path (log + fire callback + return) reports
+        // it without crashing.
+        const auto category = static_cast<Kernel::ResourceLimitCategory>(
+            overlay_ncch->exheader_header.arm11_system_local_caps.resource_limit_category);
+        if (static_cast<u8>(category) > static_cast<u8>(Kernel::ResourceLimitCategory::Other)) {
+            LOG_ERROR(Loader, "Invalid resource limit category {}; aborting load",
+                      static_cast<u32>(category));
+            return ResultStatus::ErrorInvalidFormat;
+        }
+
         std::string process_name = Common::StringFromFixedZeroTerminatedBuffer(
             (const char*)overlay_ncch->exheader_header.codeset_info.name, 8);
 
@@ -200,17 +213,6 @@ ResultStatus AppLoader_NCCH::LoadExec(std::shared_ptr<Kernel::Process>& process)
         process = system.Kernel().CreateProcess(std::move(codeset));
 
         // Attach a resource limit to the process based on the resource limit category
-        const auto category = static_cast<Kernel::ResourceLimitCategory>(
-            overlay_ncch->exheader_header.arm11_system_local_caps.resource_limit_category);
-        // xappify fork: a corrupt/undecryptable exheader yields an out-of-range resource
-        // limit category (valid range 0-3). GetForCategory() would UNREACHABLE_MSG and hard
-        // -trap the entire app. Reject the load instead so CytrusEmulator.mm's existing
-        // failure path (log + fire callback + return) reports it without crashing.
-        if (static_cast<u8>(category) > static_cast<u8>(Kernel::ResourceLimitCategory::Other)) {
-            LOG_ERROR(Loader, "Invalid resource limit category {}; aborting load",
-                      static_cast<u32>(category));
-            return ResultStatus::ErrorInvalidFormat;
-        }
         process->resource_limit = system.Kernel().ResourceLimit().GetForCategory(category);
 
         // When running N3DS-unaware titles pm will lie about the amount of memory available.

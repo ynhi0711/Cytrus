@@ -147,9 +147,14 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         .pVertexAttributeDescriptions = attributes.data(),
     };
 
+    // Metal cannot DISABLE primitive restart — for strip/fan topologies it is always effectively
+    // enabled. Passing `false` here makes MoltenVK emit VK_ERROR_FEATURE_NOT_PRESENT and drops
+    // strip/fan geometry on older Apple GPUs (e.g. A12); newer GPUs happen to render anyway. Match
+    // Metal's real behaviour so this pipeline (the game geometry, dynamic list/strip/fan topology)
+    // renders consistently across devices.
     const vk::PipelineInputAssemblyStateCreateInfo input_assembly = {
         .topology = PicaToVK::PrimitiveTopology(info.state.rasterization.topology),
-        .primitiveRestartEnable = false,
+        .primitiveRestartEnable = true,
     };
 
     const vk::PipelineRasterizationStateCreateInfo raster_state = {

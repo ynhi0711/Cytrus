@@ -106,7 +106,8 @@ constexpr vk::PipelineVertexInputStateCreateInfo PIPELINE_VERTEX_INPUT_STATE_CRE
 };
 constexpr vk::PipelineInputAssemblyStateCreateInfo PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO{
     .topology = vk::PrimitiveTopology::eTriangleList,
-    .primitiveRestartEnable = VK_FALSE,
+    // No-op for list topology; kept true for consistency (Metal can't disable primitive restart).
+    .primitiveRestartEnable = VK_TRUE,
 };
 constexpr vk::PipelineViewportStateCreateInfo PIPELINE_VIEWPORT_STATE_CREATE_INFO{
     .viewportCount = 1,

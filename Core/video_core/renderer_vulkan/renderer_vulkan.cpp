@@ -386,7 +386,8 @@ void RendererVulkan::BuildPipelines() {
 
     const vk::PipelineInputAssemblyStateCreateInfo input_assembly = {
         .topology = vk::PrimitiveTopology::eTriangleStrip,
-        .primitiveRestartEnable = false,
+        // Metal can't disable primitive restart; match its always-on behaviour (see vk_graphics_pipeline.cpp).
+        .primitiveRestartEnable = true,
     };
 
     const vk::PipelineRasterizationStateCreateInfo raster_state = {
@@ -508,7 +509,8 @@ void RendererVulkan::BuildPipelines() {
 
         const vk::PipelineInputAssemblyStateCreateInfo cursor_input_assembly = {
             .topology = vk::PrimitiveTopology::eTriangleList,
-            .primitiveRestartEnable = false,
+            // No-op for list topology; kept true for consistency with the strip pipelines (Metal always on).
+            .primitiveRestartEnable = true,
         };
 
         const vk::PipelineRasterizationStateCreateInfo cursor_raster = {

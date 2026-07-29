@@ -2,10 +2,14 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm>
 #include <chrono>
+#include <fstream>
 #include <sstream>
+#include <vector>
 #include <cryptopp/hex.h>
 #include <fmt/ranges.h>
+#include <zstd.h>
 #include "common/archives.h"
 #include "common/file_util.h"
 #include "common/logging/log.h"
@@ -158,26 +162,42 @@ void System::SaveState(u32 slot) const {
         }
     }
 
-    std::ostringstream sstream{std::ios_base::binary};
-    // Serialize
-    oarchive oa{sstream};
-    oa&* this;
-
-    const std::string& str{sstream.str()};
-    const auto data = std::span<const u8>{reinterpret_cast<const u8*>(str.data()), str.size()};
-    auto buffer = Common::Compression::CompressDataZSTDDefault(data);
-
     const u64 movie_id = movie.GetCurrentMovieID();
     const auto path = GetSaveStatePath(title_id, movie_id, slot);
     if (!FileUtil::CreateFullPath(path)) {
         throw std::runtime_error("Could not create path " + path);
     }
 
-    FileUtil::IOFile file(path, "wb");
-    if (!file) {
-        throw std::runtime_error("Could not open file " + path);
-    }
+    // Stream the save instead of buffering the whole state in RAM. The previous path serialized the
+    // entire system (FCRAM+VRAM+state) into a std::ostringstream, copied it again via .str(), then
+    // allocated a zstd output buffer on top — a transient spike of ~2x uncompressed + compressed
+    // (hundreds of MB) that jetsam-kills memory-tight devices on the quit auto-save. Instead:
+    // serialize to a temp file (RAM stays flat as boost flushes to disk), then stream-compress it
+    // into the .cst in fixed-size chunks. Peak extra RAM becomes a few small buffers, independent of
+    // device or FCRAM size. The .cst format is unchanged (CSTHeader + a single zstd frame carrying
+    // its content size), so LoadState is untouched.
+    const auto tmp_path = path + ".uncompressed.tmp";
+    struct TmpFileGuard {
+        std::string path;
+        ~TmpFileGuard() {
+            if (FileUtil::Exists(path)) {
+                FileUtil::Delete(path);
+            }
+        }
+    } tmp_guard{tmp_path};
 
+    // 1. Serialize the full system to the temp file.
+    {
+        std::ofstream ofs{tmp_path, std::ios_base::binary | std::ios_base::trunc};
+        if (!ofs) {
+            throw std::runtime_error("Could not open temp save file " + tmp_path);
+        }
+        oarchive oa{ofs};
+        oa&* this;
+    }
+    const u64 uncompressed_size = FileUtil::GetSize(tmp_path);
+
+    // 2. Build the header (unchanged format).
     CSTHeader header{};
     header.filetype = header_magic_bytes;
     header.program_id = title_id;
@@ -193,9 +213,71 @@ void System::SaveState(u32 slot) const {
     std::memcpy(header.build_name.data(), build_fullname.c_str(),
                 std::min(build_fullname.length(), sizeof(header.build_name) - 1));
 
-    if (file.WriteBytes(&header, sizeof(header)) != sizeof(header) ||
-        file.WriteBytes(buffer.data(), buffer.size()) != buffer.size()) {
+    // 3. Write the header, then stream-compress the temp file into the .cst.
+    FileUtil::IOFile file(path, "wb");
+    if (!file) {
+        throw std::runtime_error("Could not open file " + path);
+    }
+    if (file.WriteBytes(&header, sizeof(header)) != sizeof(header)) {
         throw std::runtime_error("Could not write to file " + path);
+    }
+
+    FileUtil::IOFile in_file(tmp_path, "rb");
+    if (!in_file) {
+        throw std::runtime_error("Could not reopen temp save file " + tmp_path);
+    }
+
+    ZSTD_CStream* const cstream = ZSTD_createCStream();
+    if (cstream == nullptr) {
+        throw std::runtime_error("Could not create ZSTD compression stream");
+    }
+    struct CStreamGuard {
+        ZSTD_CStream* stream;
+        ~CStreamGuard() {
+            ZSTD_freeCStream(stream);
+        }
+    } cstream_guard{cstream};
+
+    ZSTD_CCtx_setParameter(cstream, ZSTD_c_compressionLevel, ZSTD_CLEVEL_DEFAULT);
+    // Record the content size in the frame header so DecompressDataZSTD (LoadState) can size its
+    // output buffer, exactly as it does for CompressDataZSTDDefault today.
+    ZSTD_CCtx_setPledgedSrcSize(cstream, uncompressed_size);
+
+    const size_t in_capacity = ZSTD_CStreamInSize();
+    const size_t out_capacity = ZSTD_CStreamOutSize();
+    std::vector<u8> in_buffer(in_capacity);
+    std::vector<u8> out_buffer(out_capacity);
+
+    u64 remaining = uncompressed_size;
+    bool finished = false;
+    while (!finished) {
+        const size_t to_read = static_cast<size_t>(std::min<u64>(in_capacity, remaining));
+        if (to_read > 0 && in_file.ReadBytes(in_buffer.data(), to_read) != to_read) {
+            throw std::runtime_error("Could not read temp save file " + tmp_path);
+        }
+        remaining -= to_read;
+        const ZSTD_EndDirective mode = (remaining == 0) ? ZSTD_e_end : ZSTD_e_continue;
+
+        ZSTD_inBuffer input = {in_buffer.data(), to_read, 0};
+        bool chunk_done = false;
+        while (!chunk_done) {
+            ZSTD_outBuffer output = {out_buffer.data(), out_capacity, 0};
+            const size_t ret = ZSTD_compressStream2(cstream, &output, &input, mode);
+            if (ZSTD_isError(ret)) {
+                throw std::runtime_error(std::string("ZSTD_compressStream2 error: ") +
+                                         ZSTD_getErrorName(ret));
+            }
+            if (output.pos > 0 &&
+                file.WriteBytes(out_buffer.data(), output.pos) != output.pos) {
+                throw std::runtime_error("Could not write to file " + path);
+            }
+            if (mode == ZSTD_e_end) {
+                finished = (ret == 0);
+                chunk_done = finished;
+            } else {
+                chunk_done = (input.pos == input.size);
+            }
+        }
     }
 }
 

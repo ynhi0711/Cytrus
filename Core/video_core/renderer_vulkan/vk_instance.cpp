@@ -167,6 +167,19 @@ Instance::Instance(Frontend::EmuWindow& window, u32 physical_device_index)
 }
 
 Instance::~Instance() {
+    // xappify fork: quantify Vulkan memory still live at device teardown. MoltenVK separately logs
+    // "Destroyed VkPhysicalDevice with N MB still allocated" on quit; this pinpoints how much of that
+    // is app-owned VMA allocations (textures/buffers not yet freed) versus MoltenVK-internal state —
+    // the difference tells us whether a cache is failing to free vs. a driver-side residue. Part of
+    // the 3DS play→quit memory investigation (see docs/context/threeds-memory.md).
+    VmaTotalStatistics stats{};
+    vmaCalculateStatistics(allocator, &stats);
+    LOG_INFO(Render_Vulkan,
+             "VMA at teardown: {} live allocations, {} MiB allocated, {} MiB reserved across {} blocks",
+             stats.total.statistics.allocationCount,
+             stats.total.statistics.allocationBytes / (1024 * 1024),
+             stats.total.statistics.blockBytes / (1024 * 1024),
+             stats.total.statistics.blockCount);
     vmaDestroyAllocator(allocator);
 }
 

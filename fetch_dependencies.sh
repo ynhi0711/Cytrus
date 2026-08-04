@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 
 RELEASE="https://github.com/folium-app/SharedDependencies/releases/download/2.0"
 LIBS=(
-  libboostcontext libboostiostreams libboostprogramoptions libboostserialization
+  lib_boostcontext lib_boostiostreams lib_boostprogramoptions lib_boostserialization
   lib_cubeb lib_dynarmic lib_enet lib_faad2 lib_fmt lib_genericcodegen lib_glslang
   lib_machineindependent lib_mcl lib_openal lib_opus lib_sdl3 lib_sirit
   lib_soundtouch lib_spirv lib_teakra

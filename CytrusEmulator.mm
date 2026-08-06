@@ -16,6 +16,8 @@
 
 #include <Metal.hpp>
 
+#include "common/scm_rev.h"
+
 #define SDL_MAIN_HANDLED
 #import <SDL3/SDL_main.h>
 
@@ -50,7 +52,13 @@ static void TryShutdown() {
         
         pause_emulation.store(false);
         stop_run.store(false);
-        
+
+        // std::atomic's default constructor doesn't initialize the value before C++20 — store
+        // explicitly, exactly as the two above do. YES because no emulation loop is running yet.
+        emu_thread_finished.store(true);
+        loop_ticks.store(0);
+        run_loop_returns.store(0);
+
         SDL_SetMainReady();
     } return self;
 }
@@ -94,7 +102,22 @@ static void TryShutdown() {
 
 -(void) insert:(NSURL *)url withCallback:(void (^)())callback {
     std::scoped_lock lock(running_mutex);
-        
+
+    // xappify fork: this session's emulation thread is starting — it has not unwound, and its
+    // liveness counters restart from zero. Reset here (not in `init`) because the core is a
+    // process-lifetime singleton reused across sessions.
+    emu_thread_finished.store(false);
+    loop_ticks.store(0);
+    run_loop_returns.store(0);
+
+    // Registered FIRST so it runs LAST (scope guards unwind LIFO) — after the `TryShutdown()` guard
+    // below, after Network/InputManager shutdown, on every exit path including a failed Load. The
+    // app frees the render surfaces as soon as `stopped` flips, and doing that while `TryShutdown`
+    // is still tearing down the window corrupts the reused core.
+    SCOPE_EXIT({
+        emu_thread_finished.store(true);
+    });
+
     Core::System& system{Core::System::GetInstance()};
         
     Configuration config{};
@@ -201,8 +224,15 @@ static void TryShutdown() {
     // A local bool resets on every insert: call, so the callback fires on every boot.
     bool boot_callback_fired = false;
     while (!stop_run.load()) {
+        // xappify fork: liveness. `loop_ticks` advances on every iteration INCLUDING the paused
+        // branch, `run_loop_returns` only when RunLoop actually completed — so a frontend sampling
+        // both can tell "parked in the pause wait" from "blocked inside RunLoop" from "spinning
+        // through RunLoop without consuming my signal". See CytrusEmulator.h.
+        loop_ticks.fetch_add(1, std::memory_order_relaxed);
+
         if (!pause_emulation.load()) {
             void(system.RunLoop());
+            run_loop_returns.fetch_add(1, std::memory_order_relaxed);
         } else {
             const float volume = Settings::values.volume.GetValue();
             
@@ -228,7 +258,7 @@ static void TryShutdown() {
             callback();
         }
     }
-    
+
     Network::Shutdown();
     InputManager::Shutdown();
 }
@@ -321,14 +351,28 @@ static void TryShutdown() {
 }
 
 -(void) pause:(BOOL)pause {
-    pause_emulation.store(pause);
-    if (!pause_emulation.load())
+    // xappify fork: the store MUST happen under `paused_mutex`. The waiter in `insert:` evaluates
+    // its predicate while holding that lock and then blocks; an unpause that lands in the window
+    // between the predicate returning true and `wait()` registering is lost outright, and the
+    // emulation thread then sleeps forever with `pause_emulation == false` — the core is "running"
+    // by every observable measure but never executes another frame, so a queued save/load signal is
+    // never consumed and no outcome ever reaches the frontend.
+    {
+        std::scoped_lock pause_lock{paused_mutex};
+        pause_emulation.store(pause);
+    }
+    if (!pause)
         running_cv.notify_all();
 }
 
 -(void) stop {
-    stop_run.store(true);
-    pause_emulation.store(false);
+    // Same lost-wakeup reasoning as `pause:` — a stop issued while the emulation thread is parked
+    // must not be missed, or the thread never unwinds and `stopped` never flips.
+    {
+        std::scoped_lock pause_lock{paused_mutex};
+        stop_run.store(true);
+        pause_emulation.store(false);
+    }
     top_window->StopPresenting();
     bottom_window->StopPresenting();
     running_cv.notify_all();
@@ -341,7 +385,20 @@ static void TryShutdown() {
 }
 
 -(BOOL) stopped {
-    return stop_run.load() && pause_emulation.load();
+    // xappify fork: this used to return `stop_run && pause_emulation`, which `stop` itself makes
+    // unreachable — it sets `pause_emulation = false`. So `stopped` was permanently NO after a stop:
+    // the app's teardown drain always burned its full timeout and always logged `stopped=false`, and
+    // `CytrusAdapter.pause`'s `guard !core.stopped()` guarded nothing. Report whether the `insert:`
+    // emulation loop has actually unwound instead — which is what every caller already meant.
+    return emu_thread_finished.load();
+}
+
+-(uint64_t) loopTicks {
+    return loop_ticks.load(std::memory_order_relaxed);
+}
+
+-(uint64_t) runLoopReturns {
+    return run_loop_returns.load(std::memory_order_relaxed);
 }
 
 -(void) orientationChanged:(UIInterfaceOrientation)orientation metalView:(UIView *)metalView secondary:(BOOL)secondary {
@@ -603,18 +660,77 @@ static void TryShutdown() {
     return [[NSFileManager defaultManager] fileExistsAtPath:[NSString stringWithCString:path.c_str() encoding:NSUTF8StringEncoding]];
 }
 
--(void) load:(NSInteger)slot {
+-(BOOL) load:(NSInteger)slot {
     if (![self running])
-        return;
-    
-    Core::System::GetInstance().SendSignal(Core::System::Signal::Load, [[NSNumber numberWithInteger:slot] intValue]);
+        return FALSE;
+
+    return Core::System::GetInstance().SendSignal(Core::System::Signal::Load, [[NSNumber numberWithInteger:slot] intValue]);
 }
 
--(void) save:(NSInteger)slot {
+-(BOOL) save:(NSInteger)slot {
     if (![self running])
+        return FALSE;
+
+    return Core::System::GetInstance().SendSignal(Core::System::Signal::Save, [[NSNumber numberWithInteger:slot] intValue]);
+}
+
+// xappify fork addition. Installs a Core::System save-state callback that hops to the main queue,
+// so the frontend can distinguish "request queued" from "state actually applied".
+//
+// The callback captures nothing and re-reads the singleton at delivery time — the core is a
+// process-lifetime object, so a captured self would outlive every session, and re-reading also means
+// a handler replaced between request and resolution is honoured.
+-(void) setSaveStateHandler:(nullable void (^)(BOOL, CytrusSaveStateOutcome, NSString *))saveStateHandler {
+    _saveStateHandler = [saveStateHandler copy];
+
+    if (!saveStateHandler) {
+        Core::System::GetInstance().SetSaveStateCallback(nullptr);
         return;
-    
-    Core::System::GetInstance().SendSignal(Core::System::Signal::Save, [[NSNumber numberWithInteger:slot] intValue]);
+    }
+
+    Core::System::GetInstance().SetSaveStateCallback([](bool isLoad, Core::System::SaveStateOutcome outcome, const std::string& details) {
+        CytrusSaveStateOutcome mapped;
+        switch (outcome) {
+            case Core::System::SaveStateOutcome::Success:
+                mapped = CytrusSaveStateOutcomeSuccess;
+                break;
+            case Core::System::SaveStateOutcome::TransientFailure:
+                mapped = CytrusSaveStateOutcomeTransientFailure;
+                break;
+            case Core::System::SaveStateOutcome::PermanentFailure:
+                mapped = CytrusSaveStateOutcomePermanentFailure;
+                break;
+        }
+
+        NSString *message = [NSString stringWithUTF8String:details.c_str()] ?: @"";
+
+        // Probe 2 of 3 (Core::System::NotifySaveStateResult → HERE → the Swift adapter). SAVE
+        // outcomes are currently lost somewhere along this chain while LOAD outcomes arrive; these
+        // two printfs separate "never reached the trampoline" from "reached it but the main-queue
+        // delivery found no handler". They print to the device console, unlike the core's own log.
+        // Remove with the other two once the loss is fixed.
+        printf("[Cytrus] saveStateCallback ENTER isLoad=%d outcome=%d details='%s'\n",
+               (int)isLoad, (int)mapped, details.c_str());
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CytrusEmulator *emulator = [CytrusEmulator sharedInstance];
+            printf("[Cytrus] saveStateCallback DELIVER isLoad=%d handler=%s\n",
+                   (int)isLoad, emulator.saveStateHandler ? "set" : "nil");
+            if (emulator.saveStateHandler)
+                emulator.saveStateHandler(isLoad, mapped, message);
+        });
+    });
+}
+
+-(uint64_t) runningTitleID {
+    if (![self running])
+        return 0;
+
+    return Core::System::GetInstance().GetTitleID();
+}
+
+-(NSString *) saveStateRevision {
+    return [NSString stringWithUTF8String:Common::g_scm_rev] ?: @"";
 }
 
 -(BOOL) insertAmiibo:(NSURL *)url {

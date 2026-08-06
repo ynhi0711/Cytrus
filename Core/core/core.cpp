@@ -77,9 +77,31 @@ System::System() : movie{*this}, cheat_engine{*this} {}
 
 System::~System() = default;
 
+/// Defined below, next to `SendSignal`.
+static const char* SignalName(System::Signal signal);
+
 System::ResultStatus System::RunLoop(bool tight_loop) {
     status = ResultStatus::Success;
     if (!IsPoweredOn()) {
+        // xappify fork: this return is BEFORE the signal block below, so a queued Save/Load used to
+        // sit in `current_signal` forever with no trace and no callback — the frontend just waited
+        // out its whole backstop and reported "timed out waiting for the core", which says nothing
+        // about why. Resolve it here instead: the request was never processed, and the core may well
+        // be powered on again by the next attempt, so it is a transient failure.
+        Signal pending{Signal::None};
+        {
+            std::scoped_lock lock{signal_mutex};
+            if (current_signal == Signal::Save || current_signal == Signal::Load) {
+                pending = current_signal;
+                current_signal = Signal::None;
+            }
+        }
+        if (pending != Signal::None) {
+            LOG_ERROR(Core, "Discarding queued {} — the core is not powered on", SignalName(pending));
+            status_details = "Core is not powered on";
+            NotifySaveStateResult(pending == Signal::Load, SaveStateOutcome::TransientFailure,
+                                  status_details);
+        }
         return ResultStatus::ErrorNotInitialized;
     }
 
@@ -126,6 +148,7 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         if (save_state_request_status != SaveStateStatus::NONE) {
             LOG_ERROR(Core, "A pending save state operation has not finished yet");
             status_details = "A pending save state operation has not finished yet";
+            NotifySaveStateResult(true, SaveStateOutcome::TransientFailure, status_details);
             return ResultStatus::ErrorSavestate;
         }
         save_state_slot = param;
@@ -137,6 +160,7 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         if (save_state_request_status != SaveStateStatus::NONE) {
             LOG_ERROR(Core, "A pending save state operation has not finished yet");
             status_details = "A pending save state operation has not finished yet";
+            NotifySaveStateResult(false, SaveStateOutcome::TransientFailure, status_details);
             return ResultStatus::ErrorSavestate;
         }
         save_state_slot = param;
@@ -159,8 +183,14 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         } catch (const std::exception& e) {
             LOG_ERROR(Core, "Error loading: {}", e.what());
             status_details = e.what();
+            // The state was read and rejected (validation, truncated payload, deserialize) — the
+            // same file will fail identically next time, so tell the frontend not to retry it.
+            NotifySaveStateResult(true, SaveStateOutcome::PermanentFailure, status_details);
             return ResultStatus::ErrorSavestate;
         }
+        // Success carries the phase breakdown, so a slow-but-working resume is diagnosable from the
+        // frontend log alone.
+        NotifySaveStateResult(true, SaveStateOutcome::Success, save_state_timings);
         frame_limiter.WaitOnce();
         return ResultStatus::Success;
     } else if (save_state_request_status == SaveStateStatus::SAVING && kernel.get() &&
@@ -174,16 +204,21 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         } catch (const std::exception& e) {
             LOG_ERROR(Core, "Error saving: {}", e.what());
             status_details = e.what();
+            NotifySaveStateResult(false, SaveStateOutcome::PermanentFailure, status_details);
             return ResultStatus::ErrorSavestate;
         }
+        NotifySaveStateResult(false, SaveStateOutcome::Success, save_state_timings);
         frame_limiter.WaitOnce();
         return ResultStatus::Success;
     } else if (save_state_request_status != SaveStateStatus::NONE &&
                (std::chrono::steady_clock::now() - save_state_request_time) >
                    std::chrono::seconds(5)) {
+        const bool was_loading = save_state_request_status == SaveStateStatus::LOADING;
         save_state_request_status = SaveStateStatus::NONE;
         LOG_ERROR(Core, "Cannot perform save state operation due to pending async operations");
         status_details = "Cannot perform save state operation due to pending async operations";
+        // Never processed — the async ops may well have drained by the next attempt.
+        NotifySaveStateResult(was_loading, SaveStateOutcome::TransientFailure, status_details);
         return ResultStatus::ErrorSavestate;
     }
 
@@ -278,10 +313,54 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
     return status;
 }
 
+/// xappify fork addition — see `System::SaveStateCallback` in core.h. Runs on the emulation thread;
+/// the frontend is responsible for marshalling to its own queue.
+void System::NotifySaveStateResult(bool is_load, SaveStateOutcome outcome,
+                                   const std::string& details) {
+    // Logged unconditionally, including when no callback is installed: a SAVE outcome is currently
+    // being lost somewhere between here and the frontend while LOAD outcomes arrive fine, and this
+    // is the first of three probes (here → the ObjC trampoline → the Swift adapter) that says which
+    // hop drops it. Remove all three once that is fixed.
+    LOG_INFO(Core, "NotifySaveStateResult is_load={} outcome={} callback_installed={} details='{}'",
+             is_load, static_cast<int>(outcome), static_cast<bool>(save_state_callback), details);
+
+    if (!save_state_callback) {
+        return;
+    }
+    save_state_callback(is_load, outcome, details);
+}
+
+/// Human-readable signal name for the failure details the frontend surfaces. `Signal` has no
+/// fmt formatter, so it would otherwise print as a bare integer.
+static const char* SignalName(System::Signal signal) {
+    switch (signal) {
+    case System::Signal::None:
+        return "None";
+    case System::Signal::Shutdown:
+        return "Shutdown";
+    case System::Signal::Reset:
+        return "Reset";
+    case System::Signal::Save:
+        return "Save";
+    case System::Signal::Load:
+        return "Load";
+    }
+    return "Unknown";
+}
+
 bool System::SendSignal(System::Signal signal, u32 param) {
     std::scoped_lock lock{signal_mutex};
     if (current_signal != signal && current_signal != Signal::None) {
-        LOG_ERROR(Core, "Unable to {} as {} is ongoing", signal, current_signal);
+        LOG_ERROR(Core, "Unable to {} as {} is ongoing", SignalName(signal),
+                  SignalName(current_signal));
+        // A refused Save/Load never reaches RunLoop's resolution block, so report it here or the
+        // request vanishes without a trace (the caller only ever sees the bool we return, and the
+        // iOS wrapper historically discarded even that).
+        if (signal == Signal::Load || signal == Signal::Save) {
+            NotifySaveStateResult(signal == Signal::Load, SaveStateOutcome::TransientFailure,
+                                  fmt::format("Unable to {} as {} is ongoing", SignalName(signal),
+                                              SignalName(current_signal)));
+        }
         return false;
     }
     current_signal = signal;
@@ -859,10 +938,27 @@ void System::serialize(Archive& ar, const unsigned int file_version) {
     if (Archive::is_loading::value) {
         // When loading, we want to make sure any lingering state gets cleared out before we begin.
         // Shutdown, but persist a few things between loads...
+        //
+        // These two lines are the bulk of a savestate load's wall-clock: Shutdown destroys the whole
+        // Vulkan device (blocking on the scheduler, the present thread and the pipeline workers) and
+        // Init rebuilds it from scratch — new VkInstance/VkDevice, surface, swapchain, glslang
+        // compiles, pipeline builds. Timed separately so a slow load can be attributed instead of
+        // guessed at.
+        const auto shutdown_start = std::chrono::steady_clock::now();
         Shutdown(true);
+        const auto shutdown_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - shutdown_start)
+                                     .count();
 
+        const auto init_start = std::chrono::steady_clock::now();
         [[maybe_unused]] const System::ResultStatus result =
             Init(*m_emu_window, m_secondary_window, mem_mode, num_cores);
+        const auto init_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - init_start)
+                                 .count();
+
+        save_state_timings = fmt::format("shutdown {}ms, init {}ms", shutdown_ms, init_ms);
+        LOG_INFO(Core, "Savestate load: shutdown {}ms, init {}ms", shutdown_ms, init_ms);
     }
 
     // Flush on save, don't flush on load
@@ -916,7 +1012,16 @@ void System::serialize(Archive& ar, const unsigned int file_version) {
                 const std::shared_ptr<Kernel::Process> process = thread->owner_process.lock();
                 if (process) {
                     gpu->ApplyPerProgramSettings(process->codeset->program_id);
+                    // Rebuilds the per-title disk shader cache from scratch — the same work the BOOT
+                    // path shows a progress bar for (`disk_cache_callback`), here with no callback
+                    // wired. Frequently the single largest term in a resume.
+                    const auto resources_start = std::chrono::steady_clock::now();
                     gpu->Renderer().Rasterizer()->SwitchDiskResources(process->codeset->program_id);
+                    const auto resources_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  std::chrono::steady_clock::now() - resources_start)
+                                                  .count();
+                    save_state_timings += fmt::format(", disk-resources {}ms", resources_ms);
+                    LOG_INFO(Core, "Savestate load: disk-resources {}ms", resources_ms);
                 }
             }
         }

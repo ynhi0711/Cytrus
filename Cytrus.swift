@@ -347,8 +347,30 @@ extension Cytrus {
     public func saveState(_ completionHandler: @escaping (Bool) -> Void) { completionHandler(emulator.saveState()) }
     
     public func stateExists(_ identifier: UInt64, _ slot: Int) -> Bool { emulator.stateExists(identifier, forSlot: slot) }
-    public func load(_ slot: Int) { emulator.load(slot) }
-    public func save(_ slot: Int) { emulator.save(slot) }
+    /// Returns whether the request was ACCEPTED INTO THE QUEUE — not whether the state applied.
+    /// The emulation loop resolves it frames later; observe `saveStateHandler` for the real result.
+    @discardableResult public func load(_ slot: Int) -> Bool { emulator.load(slot) }
+    @discardableResult public func save(_ slot: Int) -> Bool { emulator.save(slot) }
+
+    /// Install a handler that fires on the main queue once a queued load/save actually RESOLVES.
+    /// `details` is empty on success and carries the core's rejection reason otherwise (stale build
+    /// revision, wrong title, pending async operations, deserialize failure). The outcome separates
+    /// failures worth retrying from ones that never will be. Pass nil to clear.
+    public func setSaveStateHandler(_ handler: ((_ isLoad: Bool, _ outcome: CytrusSaveStateOutcome, _ details: String) -> Void)?) {
+        guard let handler else {
+            emulator.saveStateHandler = nil
+            return
+        }
+        emulator.saveStateHandler = { isLoad, outcome, details in
+            handler(isLoad, outcome, details)
+        }
+    }
+
+    /// Title ID of the running application (0 when nothing is booted) and this build's save-state
+    /// revision — together they're exactly what the core validates a `.cst` header against, so the
+    /// app can reject an incompatible state before requesting a load that would silently fail.
+    public var runningTitleID: UInt64 { emulator.runningTitleID() }
+    public var saveStateRevision: String { emulator.saveStateRevision() }
     
     public func insertAmiibo(_ url: URL) -> Bool { emulator.insertAmiibo(url) }
     public func removeAmiibo() { emulator.removeAbiibo() }

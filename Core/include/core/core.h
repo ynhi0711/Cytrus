@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -358,6 +359,46 @@ public:
         return save_state_status;
     }
 
+    /// xappify fork addition. `(is_load, success, details)` — invoked on the emulation thread the
+    /// moment a queued `Signal::Save`/`Signal::Load` RESOLVES, plus immediately when a request is
+    /// refused outright.
+    ///
+    /// Why this exists: requesting a save state is fire-and-forget (`SendSignal` only enqueues) and
+    /// the iOS emu loop discards `RunLoop`'s `ResultStatus`, so a frontend had NO way to learn
+    /// whether a state actually applied. It would report success as soon as the signal was posted
+    /// while the load was silently rejected further down (wrong build revision, wrong title, pending
+    /// async ops, `bad_alloc` in the deserialize). This callback is the only truthful channel.
+    ///
+    /// `details` is empty on success and carries the failure reason otherwise.
+    ///
+    /// The outcome distinguishes failures worth retrying from ones that never will be — the
+    /// knowledge lives here, and a frontend shouldn't have to infer it by matching on `details`.
+    enum class SaveStateOutcome {
+        Success,
+        /// The request was refused or deferred without ever being processed (another signal in
+        /// flight, a prior operation still pending, the async-operations deadline). Retrying later
+        /// can succeed.
+        TransientFailure,
+        /// The state itself was processed and rejected — wrong title, wrong build revision,
+        /// truncated payload, deserialize or disk error. Retrying the same file cannot help.
+        PermanentFailure,
+    };
+
+    using SaveStateCallback = std::function<void(bool, SaveStateOutcome, const std::string&)>;
+
+    void SetSaveStateCallback(SaveStateCallback callback) {
+        save_state_callback = std::move(callback);
+    }
+
+    /// Invokes `save_state_callback` if one is installed. Emulation thread only.
+    void NotifySaveStateResult(bool is_load, SaveStateOutcome outcome, const std::string& details);
+
+    /// The title ID of the running application — the value save states are keyed and validated
+    /// against (see `savestate.cpp`). 0 when nothing is loaded.
+    [[nodiscard]] u64 GetTitleID() const {
+        return title_id;
+    }
+
     void SaveState(u32 slot) const;
 
     void LoadState(u32 slot);
@@ -461,6 +502,12 @@ private:
     SaveStateStatus save_state_request_status = SaveStateStatus::NONE;
     u32 save_state_slot = 0;
     std::chrono::steady_clock::time_point save_state_request_time{};
+    /// Set once by the frontend before boot; only ever read/invoked on the emulation thread.
+    SaveStateCallback save_state_callback;
+    /// Human-readable phase breakdown of the last save/load, reported to the frontend as the success
+    /// `details`. A load is dominated by the Vulkan teardown/rebuild inside `serialize`, not by the
+    /// archive, so the split is what makes it diagnosable. `mutable` because `SaveState` is const.
+    mutable std::string save_state_timings;
 
     ResultStatus status = ResultStatus::Success;
     std::string status_details = "";

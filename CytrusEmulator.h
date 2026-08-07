@@ -84,6 +84,10 @@ NS_ASSUME_NONNULL_BEGIN
     // `stop_run && pause_emulation`, which `stop` itself makes impossible (it clears
     // pause_emulation) — see `stopped`.
     std::atomic_bool emu_thread_finished;
+
+    // xappify fork: one-shot request for a guest thread dump, consumed by the `insert:` loop.
+    // See `requestGuestStateDump`.
+    std::atomic_bool dump_guest_state;
 #endif
 }
 
@@ -196,6 +200,17 @@ NS_ASSUME_NONNULL_BEGIN
 -(uint64_t) systemFrames;
 /// GSP frame submissions by the guest — freezes the moment the title stops drawing.
 -(uint64_t) gameFrames;
+
+/// Ask the core to log every guest thread's status and what it is blocked on (see
+/// `Kernel::KernelSystem::LogGuestThreadState`). Use when `gameFrames` has gone flat while
+/// `systemFrames` keeps climbing — the emulator is fine and the emulated title is wedged, and the
+/// guest thread states are the only thing that says why.
+///
+/// Asynchronous BY DESIGN: the scheduler mutates the thread list on the emulation thread, so
+/// walking it from the UI thread would be a data race. This only sets a flag; the `insert:` run
+/// loop performs the dump on its next iteration (sub-millisecond in practice). Output goes to the
+/// core's log file, not the console — read it back with the frontend's log tail dump.
+-(void) requestGuestStateDump;
 
 -(BOOL) insertAmiibo:(NSURL *)url;
 -(void) removeAbiibo;

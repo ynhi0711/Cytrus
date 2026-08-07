@@ -58,6 +58,7 @@ static void TryShutdown() {
         emu_thread_finished.store(true);
         loop_ticks.store(0);
         run_loop_returns.store(0);
+        dump_guest_state.store(false);
 
         SDL_SetMainReady();
     } return self;
@@ -229,6 +230,13 @@ static void TryShutdown() {
         // both can tell "parked in the pause wait" from "blocked inside RunLoop" from "spinning
         // through RunLoop without consuming my signal". See CytrusEmulator.h.
         loop_ticks.fetch_add(1, std::memory_order_relaxed);
+
+        // xappify fork: serviced HERE, on the emulation thread, because the scheduler mutates the
+        // thread list this walks — see `requestGuestStateDump`. Cheap: an uncontended atomic
+        // exchange per iteration, and the dump itself only runs when a freeze has been detected.
+        if (dump_guest_state.exchange(false, std::memory_order_relaxed)) {
+            system.Kernel().LogGuestThreadState("wedge");
+        }
 
         if (!pause_emulation.load()) {
             void(system.RunLoop());
@@ -409,6 +417,15 @@ static void TryShutdown() {
 
 -(uint64_t) gameFrames {
     return Core::System::GetInstance().GetTotalGameFrames();
+}
+
+-(void) requestGuestStateDump {
+    // Only meaningful while a title is running; the flag would otherwise sit set until the next boot
+    // and fire a dump against a freshly-booted (healthy) session.
+    if (stop_run.load() || !Core::System::GetInstance().IsPoweredOn()) {
+        return;
+    }
+    dump_guest_state.store(true, std::memory_order_relaxed);
 }
 
 -(void) orientationChanged:(UIInterfaceOrientation)orientation metalView:(UIView *)metalView secondary:(BOOL)secondary {

@@ -6,6 +6,7 @@
 #include <boost/serialization/unordered_map.hpp>
 #include <boost/serialization/vector.hpp>
 #include "common/archives.h"
+#include "common/logging/log.h" // xappify fork: LogGuestThreadState
 #include "common/serialization/atomic.h"
 #include "common/settings.h"
 #include "core/hle/kernel/client_port.h"
@@ -121,6 +122,80 @@ ThreadManager& KernelSystem::GetCurrentThreadManager() {
 
 const ThreadManager& KernelSystem::GetCurrentThreadManager() const {
     return *thread_managers[current_cpu->GetID()];
+}
+
+namespace {
+const char* ThreadStatusName(ThreadStatus status) {
+    switch (status) {
+    case ThreadStatus::Running:
+        return "Running";
+    case ThreadStatus::Ready:
+        return "Ready";
+    case ThreadStatus::WaitArb:
+        return "WaitArb";
+    case ThreadStatus::WaitSleep:
+        return "WaitSleep";
+    case ThreadStatus::WaitIPC:
+        return "WaitIPC";
+    case ThreadStatus::WaitSynchAny:
+        return "WaitSynchAny";
+    case ThreadStatus::WaitSynchAll:
+        return "WaitSynchAll";
+    case ThreadStatus::WaitHleEvent:
+        return "WaitHleEvent";
+    case ThreadStatus::Dormant:
+        return "Dormant";
+    case ThreadStatus::Dead:
+        return "Dead";
+    }
+    return "Unknown";
+}
+} // Anonymous namespace
+
+// xappify fork — see the header for why this exists and why it is emulation-thread only.
+void KernelSystem::LogGuestThreadState(const char* marker) const {
+    LOG_CRITICAL(Kernel, "[guest-state] {} BEGIN cores={}", marker, thread_managers.size());
+
+    for (u32 core_id = 0; core_id < thread_managers.size(); ++core_id) {
+        const ThreadManager& manager = *thread_managers[core_id];
+        const Thread* current = manager.GetCurrentThread();
+
+        for (const auto& thread : manager.GetThreadList()) {
+            if (!thread) {
+                continue;
+            }
+
+            // The wait list is the payload: a deadlocked title shows one or more threads parked on
+            // an object that will never be signalled, and the object's NAME is what identifies the
+            // subsystem at fault (a service session, a GSP/DSP interrupt event, a mutex).
+            std::string waiting_on;
+            for (const auto& object : thread->wait_objects) {
+                if (!waiting_on.empty()) {
+                    waiting_on += ", ";
+                }
+                if (object) {
+                    waiting_on +=
+                        fmt::format("{} \"{}\"", object->GetTypeName(), object->GetName());
+                } else {
+                    waiting_on += "<null>";
+                }
+            }
+            if (thread->status == ThreadStatus::WaitArb) {
+                // WaitArb parks on an address rather than an object, so the list above is empty.
+                waiting_on = fmt::format("AddressArbiter @ {:#010x}", thread->wait_address);
+            }
+
+            LOG_CRITICAL(Kernel,
+                         "[guest-state] {} core={} tid={} name=\"{}\" status={} prio={} "
+                         "pc={:#010x} current={} heldMutexes={} pendingMutexes={} waiting-on=[{}]",
+                         marker, core_id, thread->thread_id, thread->name,
+                         ThreadStatusName(thread->status), thread->current_priority,
+                         thread->context.GetProgramCounter(), thread.get() == current ? 1 : 0,
+                         thread->held_mutexes.size(), thread->pending_mutexes.size(), waiting_on);
+        }
+    }
+
+    LOG_CRITICAL(Kernel, "[guest-state] {} END", marker);
 }
 
 TimerManager& KernelSystem::GetTimerManager() {

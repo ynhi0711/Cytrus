@@ -292,6 +292,23 @@ public:
     ThreadManager& GetThreadManager(u32 core_id);
     const ThreadManager& GetThreadManager(u32 core_id) const;
 
+    /**
+     * xappify fork: logs every guest thread on every core at LOG_CRITICAL — id, name, status,
+     * priority, PC, and for each object it is blocked on, that object's type and name.
+     *
+     * Diagnoses the failure where the EMULATOR is healthy and the emulated TITLE is not: the run
+     * loop keeps completing passes and the system keeps producing LCD VBlanks, but the guest stops
+     * submitting GSP frames, so the picture freezes and the audio sink starves into repeating its
+     * last buffer. Every emulator-level liveness signal looks normal, and only the guest thread
+     * states say why — typically one thread parked in WaitIPC/WaitSynchAny on a service reply or
+     * event that never arrives.
+     *
+     * MUST be called from the emulation thread. `thread_list` is a live vector mutated by the
+     * scheduler; walking it from the UI thread is a data race. See `-[CytrusEmulator
+     * requestGuestStateDump]`, which defers to the `insert:` run loop for exactly this reason.
+     */
+    void LogGuestThreadState(const char* marker) const;
+
     ThreadManager& GetCurrentThreadManager();
     const ThreadManager& GetCurrentThreadManager() const;
 

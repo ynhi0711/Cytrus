@@ -39,4 +39,14 @@ void SetGlobalFilter(const Filter& filter);
 bool SetRegexFilter(const std::string& regex);
 
 void SetColorConsoleBackendEnabled(bool enabled);
+
+/**
+ * xappify fork: flush every backend now.
+ *
+ * Entries are normally handed to a queue that a logging thread drains, and the file backend only
+ * flushes on Error-or-worse or every 100 MiB — so a burst written for diagnostics can still be in
+ * flight when something else goes to read the log file. Call this after writing a diagnostic dump
+ * that is about to be read back.
+ */
+void FlushBackends();
 } // namespace Common::Log

@@ -80,6 +80,9 @@ public:
 
     void NotifySurfaceChanged(bool second) override;
 
+    void SuspendPresentation() override;
+    void ResumePresentation() override;
+
     void SwapBuffers() override;
     void TryPresent(int timeout_ms, bool is_secondary) override {}
 

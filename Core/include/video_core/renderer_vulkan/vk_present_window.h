@@ -55,6 +55,23 @@ public:
     /// This is called to notify the rendering backend of a surface change
     void NotifySurfaceChanged();
 
+    /**
+     * xappify fork: stop / restart actually touching the presentation surface.
+     *
+     * On iOS a backgrounded `CAMetalLayer` cannot vend a drawable, so `AcquireNextImage` fails
+     * forever and `CopyToSwapchain` spins recreating the swapchain while holding `swapchain_mutex`
+     * — frames never return to `free_queue`, and the emulation thread blocks in `GetRenderFrame`
+     * inside `Core::System::RunLoop`. Device-measured: 85.7 seconds of a completely dead emulator
+     * after one background→foreground round trip.
+     *
+     * While suspended, `CopyToSwapchain` recycles each frame immediately without touching the
+     * surface, so the producer never starves however long the app stays away. Pausing the emulator
+     * is NOT a substitute: the pause flag is only read at the top of the run loop, so it cannot
+     * unblock a present that is already in flight.
+     */
+    void SuspendPresentation();
+    void ResumePresentation();
+
     [[nodiscard]] vk::RenderPass Renderpass() const noexcept {
         return present_renderpass;
     }
@@ -96,6 +113,9 @@ private:
     bool blit_supported;
     bool use_present_thread{true};
     void* last_render_surface{};
+    /// xappify fork: see SuspendPresentation. Atomic because the present thread reads it while the
+    /// UI thread writes it, with no lock in common.
+    std::atomic_bool presentation_suspended{false};
 };
 
 } // namespace Vulkan

@@ -88,6 +88,7 @@ NS_ASSUME_NONNULL_BEGIN
     // xappify fork: one-shot request for a guest thread dump, consumed by the `insert:` loop.
     // See `requestGuestStateDump`.
     std::atomic_bool dump_guest_state;
+    std::atomic_uint64_t guest_state_dumps;
 #endif
 }
 
@@ -211,6 +212,25 @@ NS_ASSUME_NONNULL_BEGIN
 /// loop performs the dump on its next iteration (sub-millisecond in practice). Output goes to the
 /// core's log file, not the console — read it back with the frontend's log tail dump.
 -(void) requestGuestStateDump;
+
+/// Completed guest-state dumps. `requestGuestStateDump` is asynchronous, so poll this to know the
+/// dump actually ran before reading the log back — otherwise "the dump didn't happen" and "the log
+/// was read too early" are indistinguishable, which has already cost a debugging round.
+-(uint64_t) guestStateDumps;
+
+// xappify fork — app lifecycle. Call `suspendPresentation` BEFORE backgrounding and
+// `resumePresentation` after returning to the foreground.
+//
+// A backgrounded `CAMetalLayer` cannot vend a drawable, and the Vulkan backend's present path used
+// to wait for one forever — blocking the EMULATION thread inside `Core::System::RunLoop` for as
+// long as the app stayed away (device-measured: 85.7s, with the app alive and audio starved into
+// repeating its last buffer). Pausing is NOT a substitute: `pause:` only sets a flag the run loop
+// reads at the top of its next iteration, so it cannot unblock a present already in flight.
+//
+// `resumePresentation` also marks the swapchain for recreation, because the layer's drawables do
+// not survive the transition.
+-(void) suspendPresentation;
+-(void) resumePresentation;
 
 -(BOOL) insertAmiibo:(NSURL *)url;
 -(void) removeAbiibo;

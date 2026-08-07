@@ -74,6 +74,14 @@ public:
     /// swapchain so the new mode takes effect. Cheap: uses cached device capabilities.
     [[nodiscard]] bool NeedsPresentModeUpdate() const;
 
+    /// xappify fork: force a rebuild on the next acquire, for a surface that has gone stale without
+    /// the driver reporting it — an iOS layer coming back to the foreground does not necessarily
+    /// return eErrorOutOfDateKHR, it just fails to vend drawables. See
+    /// `PresentWindow::NotifySurfaceChanged`.
+    void MarkNeedsRecreation() {
+        needs_recreation = true;
+    }
+
 private:
     /// Selects the best available swapchain image format
     void FindPresentFormat();

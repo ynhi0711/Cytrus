@@ -1450,4 +1450,21 @@ void RendererVulkan::NotifySurfaceChanged(bool is_second_window) {
     }
 }
 
+// xappify fork — see RendererBase. Both windows are driven together: the frontend's lifecycle
+// events are app-wide, and leaving the secondary presenting while the main one is suspended would
+// reintroduce exactly the stall these exist to prevent.
+void RendererVulkan::SuspendPresentation() {
+    main_present_window.SuspendPresentation();
+    if (secondary_present_window_ptr) {
+        secondary_present_window_ptr->SuspendPresentation();
+    }
+}
+
+void RendererVulkan::ResumePresentation() {
+    main_present_window.ResumePresentation();
+    if (secondary_present_window_ptr) {
+        secondary_present_window_ptr->ResumePresentation();
+    }
+}
+
 } // namespace Vulkan

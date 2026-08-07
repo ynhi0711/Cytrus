@@ -343,6 +343,16 @@ public:
         color_console_backend.SetEnabled(enabled);
     }
 
+    // xappify fork: drain whatever the logging thread has not written yet, then flush the backends,
+    // so a diagnostic burst is fully on disk before anything reads the log file back.
+    void FlushBackends() {
+        Entry entry;
+        while (message_queue.TryPop(entry)) {
+            ForEachBackend([&entry](Backend& backend) { backend.Write(entry); });
+        }
+        ForEachBackend([](Backend& backend) { backend.Flush(); });
+    }
+
     void PushEntry(Class log_class, Level log_level, const char* filename, unsigned int line_num,
                    const char* function, std::string message) {
         Entry new_entry = CreateEntry(log_class, log_level, filename, line_num, function,
@@ -592,6 +602,10 @@ bool SetRegexFilter(const std::string& regex) {
 
 void SetColorConsoleBackendEnabled(bool enabled) {
     Impl::Instance().SetColorConsoleBackendEnabled(enabled);
+}
+
+void FlushBackends() {
+    Impl::Instance().FlushBackends();
 }
 
 void FmtLogMessageImpl(Class log_class, Level log_level, const char* filename,

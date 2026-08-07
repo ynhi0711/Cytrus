@@ -239,9 +239,43 @@ void PresentWindow::RecreateFrame(Frame* frame, u32 width, u32 height) {
 Frame* PresentWindow::GetRenderFrame() {
     MICROPROFILE_SCOPE(Vulkan_WaitPresent);
 
-    // Wait for free presentation frames
+    // Wait for free presentation frames.
+    //
+    // xappify fork: BOUNDED. This used to be an untimed `free_cv.wait`, and it is called from the
+    // emulation thread inside `Core::System::RunLoop` — so anything that stopped the present thread
+    // from recycling frames stopped the whole emulator, silently and forever. Device-measured: an
+    // 85.7 second hang after one background→foreground round trip, with the app alive and the guest
+    // audio starved into repeating its last buffer.
+    //
+    // Waiting is still the right behaviour (it is how the frame pacing works); waiting FOREVER is
+    // not. Log every second so a stall names itself, and after the cap take the frame regardless: a
+    // torn frame recovers, a wedged emulator does not.
+    using namespace std::chrono_literals;
+    constexpr auto report_interval = 1s;
+    constexpr u32 max_reports = 5;
+
     std::unique_lock lock{free_mutex};
-    free_cv.wait(lock, [this] { return !free_queue.empty(); });
+    for (u32 waited = 0; !free_cv.wait_for(lock, report_interval,
+                                           [this] { return !free_queue.empty(); });
+         ++waited) {
+        LOG_CRITICAL(Render_Vulkan,
+                     "No free presentation frame after {}s — the present thread is not recycling "
+                     "frames (suspended={})",
+                     waited + 1, presentation_suspended.load(std::memory_order_relaxed));
+
+        // Self-defence, not a fallback frame: handing back a Frame that is still in the present
+        // queue would let the emulation thread render into an image the GPU is reading. Suspending
+        // instead makes `CopyToSwapchain` return immediately, so every in-flight frame is recycled
+        // by its caller within one pass and this wait is then satisfied legitimately. The app
+        // clears it again via ResumePresentation when it comes back to the foreground.
+        if (waited + 1 == max_reports) {
+            LOG_CRITICAL(Render_Vulkan,
+                         "Presentation starved for {}s — suspending presentation to unblock the "
+                         "emulation thread",
+                         max_reports);
+            presentation_suspended.store(true, std::memory_order_relaxed);
+        }
+    }
 
     // Take the frame from the queue
     Frame* frame = free_queue.front();
@@ -341,10 +375,41 @@ void PresentWindow::NotifySurfaceChanged() {
     std::scoped_lock lock{recreate_surface_mutex};
     next_surface = CreateSurface(instance.GetInstance(), emu_window);
     recreate_surface_cv.notify_one();
+#else
+    // xappify fork: this used to be Android-only, so on iOS there was NO way to tell the renderer
+    // its surface had gone stale — the swapchain built at boot was used forever, including across
+    // background→foreground transitions that invalidate the layer's drawables.
+    //
+    // The surface handle itself is still valid here (the CAMetalLayer outlives the transition), so
+    // rather than recreating it we mark the swapchain out-of-date; `CopyToSwapchain`'s acquire path
+    // then rebuilds it against the layer's current state on the next present.
+    swapchain.MarkNeedsRecreation();
 #endif
 }
 
+void PresentWindow::SuspendPresentation() {
+    presentation_suspended.store(true, std::memory_order_relaxed);
+    // Anything already parked in GetRenderFrame should re-evaluate now rather than burn its timeout.
+    free_cv.notify_all();
+}
+
+void PresentWindow::ResumePresentation() {
+    presentation_suspended.store(false, std::memory_order_relaxed);
+    // The surface may have been torn down and rebuilt underneath us while suspended (an iOS app
+    // returning to the foreground gets a fresh drawable pool), so force a swapchain rebuild on the
+    // next present rather than trusting the one we had.
+    NotifySurfaceChanged();
+}
+
 void PresentWindow::CopyToSwapchain(Frame* frame) {
+    // xappify fork: while suspended, do not touch the surface at all. Returning immediately is all
+    // that is needed — BOTH callers (`PresentThread` and the `!use_present_thread` branch of
+    // `Present`) push the frame back onto `free_queue` themselves, so recycling it here as well
+    // would enqueue the same frame twice. See SuspendPresentation.
+    if (presentation_suspended.load(std::memory_order_relaxed)) [[unlikely]] {
+        return;
+    }
+
     const auto recreate_swapchain = [&] {
 #ifdef ANDROID
         {
@@ -372,8 +437,27 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
     }
 #endif
 
-    while (!swapchain.AcquireNextImage()) {
+    // xappify fork: BOUNDED. This used to be `while (!AcquireNextImage()) recreate_swapchain();`.
+    // When the surface cannot vend a drawable at all — an iOS layer whose app is backgrounded, most
+    // reliably — the condition never becomes true, so this span the present thread forever while
+    // holding `swapchain_mutex`, and `free_queue` was never refilled. That is the other half of the
+    // 85-second emulation-thread block; capping it means a lost drawable costs one dropped frame.
+    constexpr u32 max_acquire_attempts = 3;
+    bool acquired = false;
+    for (u32 attempt = 0; attempt < max_acquire_attempts; ++attempt) {
+        if (swapchain.AcquireNextImage()) {
+            acquired = true;
+            break;
+        }
         recreate_swapchain();
+    }
+    if (!acquired) [[unlikely]] {
+        LOG_CRITICAL(Render_Vulkan,
+                     "Could not acquire a swapchain image in {} attempts — dropping this frame",
+                     max_acquire_attempts);
+        // Return WITHOUT presenting; the caller recycles the frame, so the emulation thread keeps
+        // getting frames and the next pass retries the acquire from scratch.
+        return;
     }
 
     const vk::Image swapchain_image = swapchain.Image();

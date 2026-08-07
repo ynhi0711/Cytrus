@@ -64,6 +64,17 @@ public:
     // if second == true then it is the second screen
     virtual void NotifySurfaceChanged(bool second) {}
 
+    /**
+     * xappify fork: stop / restart touching the presentation surface.
+     *
+     * The frontend calls these around an app lifecycle transition. On iOS a backgrounded layer
+     * cannot vend a drawable, and the Vulkan backend would otherwise block the EMULATION thread
+     * indefinitely waiting for a presentation frame that can never be recycled (device-measured:
+     * 85.7 seconds). Backends that cannot stall this way keep the no-op defaults.
+     */
+    virtual void SuspendPresentation() {}
+    virtual void ResumePresentation() {}
+
     /// Returns the resolution scale factor relative to the native 3DS screen resolution
     u32 GetResolutionScaleFactor();
 

@@ -59,6 +59,7 @@ static void TryShutdown() {
         loop_ticks.store(0);
         run_loop_returns.store(0);
         dump_guest_state.store(false);
+        guest_state_dumps.store(0);
 
         SDL_SetMainReady();
     } return self;
@@ -236,6 +237,12 @@ static void TryShutdown() {
         // exchange per iteration, and the dump itself only runs when a freeze has been detected.
         if (dump_guest_state.exchange(false, std::memory_order_relaxed)) {
             system.Kernel().LogGuestThreadState("wedge");
+            // The logging backends are asynchronous — entries go through a queue that a separate
+            // thread drains. Flush so the lines are on disk by the time the frontend reads the log
+            // tail, instead of it guessing how long to wait.
+            Common::Log::FlushBackends();
+            // Publish AFTER the flush, so a frontend that polls this can read the log immediately.
+            guest_state_dumps.fetch_add(1, std::memory_order_release);
         }
 
         if (!pause_emulation.load()) {
@@ -426,6 +433,26 @@ static void TryShutdown() {
         return;
     }
     dump_guest_state.store(true, std::memory_order_relaxed);
+}
+
+-(uint64_t) guestStateDumps {
+    return guest_state_dumps.load(std::memory_order_acquire);
+}
+
+// Both guard on IsPoweredOn for the same reason `orientationChanged` does: with no booted system the
+// GPU was never constructed and `Renderer()` dereferences a null unique_ptr.
+-(void) suspendPresentation {
+    if (stop_run.load() || !Core::System::GetInstance().IsPoweredOn()) {
+        return;
+    }
+    Core::System::GetInstance().GPU().Renderer().SuspendPresentation();
+}
+
+-(void) resumePresentation {
+    if (stop_run.load() || !Core::System::GetInstance().IsPoweredOn()) {
+        return;
+    }
+    Core::System::GetInstance().GPU().Renderer().ResumePresentation();
 }
 
 -(void) orientationChanged:(UIInterfaceOrientation)orientation metalView:(UIView *)metalView secondary:(BOOL)secondary {

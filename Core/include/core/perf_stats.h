@@ -108,6 +108,29 @@ public:
      */
     double GetStableFrameTimeScale() const;
 
+    /**
+     * xappify fork: monotonic frame totals that `GetAndResetStats` never clears.
+     *
+     * `system_frames`/`game_frames` below are cumulative-since-last-reset, so a frontend that polls
+     * them has to consume (and therefore reset) the whole stats block, which would corrupt any other
+     * consumer. These two exist purely so liveness can be SAMPLED without side effects.
+     *
+     * They answer the one question `runLoopReturns` cannot: a wedged TITLE (a guest thread blocked
+     * forever on a GPU interrupt / service reply) leaves the emulator's own loop running normally,
+     * so system frames keep climbing while game frames stop dead — video freezes and audio starves
+     * into repeating its last buffer while every emulator-level liveness signal looks healthy.
+     * Atomic + relaxed: written on the emulation thread, sampled from the UI thread; only ordering
+     * between successive samples of the same counter matters.
+     */
+    u64 GetTotalSystemFrames() const {
+        return total_system_frames.load(std::memory_order_relaxed);
+    }
+
+    /// GSP frame submissions by the guest. Freezes when the emulated title stops drawing.
+    u64 GetTotalGameFrames() const {
+        return total_game_frames.load(std::memory_order_relaxed);
+    }
+
     void AddArticBaseTraffic(u32 bytes) {
         artic_transmitted += bytes;
     }
@@ -143,6 +166,9 @@ private:
     u32 system_frames = 0;
     /// Cumulative number of game frames (GSP frame submissions) since last reset
     u32 game_frames = 0;
+    /// xappify fork: same two counts, but never reset — see GetTotalSystemFrames/GetTotalGameFrames.
+    std::atomic<u64> total_system_frames{0};
+    std::atomic<u64> total_game_frames{0};
     /// Cumulative number of transmitted artic base traffic
     std::atomic<u32> artic_transmitted = 0;
     // System events that affect performance

@@ -99,6 +99,8 @@ void PerfStats::EndSystemFrame() {
     }
     accumulated_frametime += frame_time;
     system_frames += 1;
+    // xappify fork: never reset, so liveness can be sampled without consuming the stats block.
+    total_system_frames.fetch_add(1, std::memory_order_relaxed);
 
     // TODO: Track previous frame times in a less stupid way. -OS
     previous_previous_frame_length = previous_frame_length;
@@ -111,6 +113,7 @@ void PerfStats::EndGameFrame() {
     std::scoped_lock lock{object_mutex};
 
     game_frames += 1;
+    total_game_frames.fetch_add(1, std::memory_order_relaxed);
 }
 
 double PerfStats::GetMeanFrametime() const {

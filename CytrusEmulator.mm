@@ -401,6 +401,16 @@ static void TryShutdown() {
     return run_loop_returns.load(std::memory_order_relaxed);
 }
 
+// `PerfStats` is only constructed by `System::Load`, and the accessors below already null-check it
+// — so these are safe to poll before boot and after shutdown, both of which the frontend does.
+-(uint64_t) systemFrames {
+    return Core::System::GetInstance().GetTotalSystemFrames();
+}
+
+-(uint64_t) gameFrames {
+    return Core::System::GetInstance().GetTotalGameFrames();
+}
+
 -(void) orientationChanged:(UIInterfaceOrientation)orientation metalView:(UIView *)metalView secondary:(BOOL)secondary {
     // If the system never booted (e.g. system.Load failed), the GPU was never constructed and
     // GPU().Renderer() below would dereference a null unique_ptr → EXC_BAD_ACCESS. Bail out.

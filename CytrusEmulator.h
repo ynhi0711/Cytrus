@@ -178,6 +178,25 @@ NS_ASSUME_NONNULL_BEGIN
 /// Completed `Core::System::RunLoop` calls — advances only while actually emulating.
 -(uint64_t) runLoopReturns;
 
+// xappify fork additions — GUEST liveness, which the two counters above cannot report.
+//
+// Both of those measure the EMULATOR. A wedged title (a guest thread blocked forever on a GPU
+// interrupt or a service reply that never arrives) leaves the emulation loop running normally, so
+// they keep climbing while the picture is frozen and the audio sink starves into repeating its last
+// buffer. Sampling these two separates the cases:
+//
+//   systemFrames climbing, gameFrames FROZEN → the emulated TITLE is wedged
+//   both frozen                              → the emulator stopped (also visible in runLoopReturns)
+//   both climbing                            → frames are produced; a freeze is downstream (present)
+//
+// Monotonic and side-effect free, unlike `Core::System::GetAndResetPerfStats` which clears the
+// accumulators it reports. 0 until a title is loaded.
+
+/// LCD VBlanks presented by the emulated system.
+-(uint64_t) systemFrames;
+/// GSP frame submissions by the guest — freezes the moment the title stops drawing.
+-(uint64_t) gameFrames;
+
 -(BOOL) insertAmiibo:(NSURL *)url;
 -(void) removeAbiibo;
 

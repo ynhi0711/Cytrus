@@ -188,6 +188,23 @@ public:
 
     [[nodiscard]] PerfStats::Results GetLastPerfStats();
 
+    /**
+     * xappify fork: side-effect-free liveness sampling. Unlike `GetAndResetPerfStats` these do not
+     * consume anything, so a frontend can poll them on a timer.
+     *
+     * Sampling BOTH is the point: system frames climbing while game frames stay flat means the
+     * emulator is healthy and the emulated TITLE is wedged — the failure mode where the picture
+     * freezes and audio starves while every emulator-level signal (`RunLoop` returns, thread
+     * liveness, `IsPoweredOn`) still looks normal. Zero before a title is loaded.
+     */
+    [[nodiscard]] u64 GetTotalSystemFrames() const {
+        return perf_stats ? perf_stats->GetTotalSystemFrames() : 0;
+    }
+
+    [[nodiscard]] u64 GetTotalGameFrames() const {
+        return perf_stats ? perf_stats->GetTotalGameFrames() : 0;
+    }
+
     double GetStableFrameTimeScale();
 
     /**

@@ -34,6 +34,8 @@ void Swapchain::Create(u32 width_, u32 height_, vk::SurfaceKHR surface_, bool lo
     surface = surface_;
     low_refresh_rate = low_refresh_rate_;
     needs_recreation = false;
+    suboptimal = false;
+    recreations.fetch_add(1, std::memory_order_relaxed);
 
     Destroy();
 
@@ -81,8 +83,11 @@ void Swapchain::Create(u32 width_, u32 height_, vk::SurfaceKHR surface_, bool lo
 
 bool Swapchain::AcquireNextImage() {
     if (needs_recreation) {
+        // Already marked by a previous failure or by MarkNeedsRecreation; keep whatever reason set
+        // it so the caller reports the original cause rather than this second-hand one.
         return false;
     }
+    last_acquire_failure = "none";
 
     MICROPROFILE_SCOPE(Vulkan_Acquire);
     const vk::Device device = instance.GetDevice();
@@ -94,8 +99,21 @@ bool Swapchain::AcquireNextImage() {
     case vk::Result::eSuccess:
         break;
     case vk::Result::eSuboptimalKHR:
+        // xappify fork: a SUCCESS code. The image is acquired and `image_acquired[frame_index]` is
+        // signalled, so this frame renders and presents normally. Grouping it with the error cases
+        // below (which is what upstream does) threw the frame away AND rebuilt the whole swapchain,
+        // every time — see ConsumeSuboptimal() for what that cost on device.
+        suboptimal = true;
+        break;
     case vk::Result::eErrorSurfaceLostKHR:
+        last_acquire_failure = "surface-lost";
+        needs_recreation = true;
+        break;
     case vk::Result::eErrorOutOfDateKHR:
+        // On MoltenVK this is also what a `nextDrawable` timeout surfaces as — i.e. "the layer would
+        // not vend a drawable", which is a very different problem from a genuinely stale surface.
+        // Recorded separately from `surface-lost` because the fix differs.
+        last_acquire_failure = "out-of-date";
         needs_recreation = true;
         break;
     default:
@@ -118,7 +136,11 @@ void Swapchain::Present() {
 
     MICROPROFILE_SCOPE(Vulkan_Present);
     try {
-        [[maybe_unused]] vk::Result result = instance.GetPresentQueue().presentKHR(present_info);
+        const vk::Result result = instance.GetPresentQueue().presentKHR(present_info);
+        // Same treatment as the acquire path: a success code, recorded rather than acted on.
+        if (result == vk::Result::eSuboptimalKHR) {
+            suboptimal = true;
+        }
     } catch (vk::OutOfDateKHRError&) {
         needs_recreation = true;
         return;
@@ -213,6 +235,25 @@ vk::PresentModeKHR Swapchain::DesiredPresentMode() const {
 
 bool Swapchain::NeedsPresentModeUpdate() const {
     return DesiredPresentMode() != present_mode;
+}
+
+bool Swapchain::ConsumeSuboptimal() {
+    if (!suboptimal) {
+        return false;
+    }
+    suboptimal = false;
+
+    // The one condition a rebuild actually fixes. Querying the surface is only paid for on a
+    // Suboptimal, not per frame.
+    const vk::SurfaceCapabilitiesKHR capabilities =
+        instance.GetPhysicalDevice().getSurfaceCapabilitiesKHR(surface);
+    if (capabilities.currentExtent.width == std::numeric_limits<u32>::max()) {
+        // The surface defers to us for the extent, so ours cannot be the thing it is unhappy about.
+        return false;
+    }
+
+    return capabilities.currentExtent.width != extent.width ||
+           capabilities.currentExtent.height != extent.height;
 }
 
 void Swapchain::SetSurfaceProperties() {

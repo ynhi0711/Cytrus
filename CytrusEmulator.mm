@@ -17,6 +17,9 @@
 #include <Metal.hpp>
 
 #include "common/scm_rev.h"
+// xappify fork: the wedge dump reaches into GSP for the interrupt/framebuffer state.
+#include "core/hle/service/gsp/gsp_gpu.h"
+#include "core/hle/service/sm/sm.h"
 
 #define SDL_MAIN_HANDLED
 #import <SDL3/SDL_main.h>
@@ -237,6 +240,13 @@ static void TryShutdown() {
         // exchange per iteration, and the dump itself only runs when a freeze has been detected.
         if (dump_guest_state.exchange(false, std::memory_order_relaxed)) {
             system.Kernel().LogGuestThreadState("wedge");
+            // The GSP↔guest boundary, dumped alongside the thread states because the thread states
+            // alone cannot say WHICH side stalled: a render thread parked on
+            // `GSP_GPU::interrupt_event` looks identical whether the interrupt stopped arriving or
+            // the title stopped asking for frames. See `GSP_GPU::LogState`.
+            if (auto gsp = system.ServiceManager().GetService<Service::GSP::GSP_GPU>("gsp::Gpu")) {
+                gsp->LogState("wedge");
+            }
             // The logging backends are asynchronous — entries go through a queue that a separate
             // thread drains. Flush so the lines are on disk by the time the frontend reads the log
             // tail, instead of it guessing how long to wait.
@@ -246,6 +256,11 @@ static void TryShutdown() {
         }
 
         if (!pause_emulation.load()) {
+            // xappify fork: one PC sample per completed pass, feeding the histogram
+            // `LogGuestThreadState` prints. Taken BEFORE `RunLoop` so it records the thread that is
+            // about to run; skipped while paused, where the guest is not executing at all and a
+            // sample would just dilute the window with a stale PC. See `KernelSystem::SamplePc`.
+            system.Kernel().SamplePc();
             void(system.RunLoop());
             run_loop_returns.fetch_add(1, std::memory_order_relaxed);
         } else {
@@ -437,6 +452,16 @@ static void TryShutdown() {
 
 -(uint64_t) guestStateDumps {
     return guest_state_dumps.load(std::memory_order_acquire);
+}
+
+-(uint64_t) swapchainRecreations {
+    // Same IsPoweredOn guard as the presentation calls below: with no booted system the GPU was
+    // never constructed and `Renderer()` dereferences a null unique_ptr. The frontend polls this
+    // from a heartbeat that starts before boot and outlives shutdown.
+    if (!Core::System::GetInstance().IsPoweredOn()) {
+        return 0;
+    }
+    return Core::System::GetInstance().GPU().Renderer().GetSwapchainRecreations();
 }
 
 // Both guard on IsPoweredOn for the same reason `orientationChanged` does: with no booted system the

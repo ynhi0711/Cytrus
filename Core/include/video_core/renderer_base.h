@@ -75,6 +75,18 @@ public:
     virtual void SuspendPresentation() {}
     virtual void ResumePresentation() {}
 
+    /**
+     * xappify fork: total swapchain rebuilds across every presentation surface this session.
+     *
+     * Polled by the frontend's liveness heartbeat. A rebuild stalls the emulation thread (it takes
+     * a queue `waitIdle` under the swapchain lock), and a run where this climbs steadily is a
+     * presentation pathology rather than an emulation one — a distinction the frame counters alone
+     * cannot make. Backends with no swapchain keep the 0 default.
+     */
+    [[nodiscard]] virtual u64 GetSwapchainRecreations() const {
+        return 0;
+    }
+
     /// Returns the resolution scale factor relative to the native 3DS screen resolution
     u32 GetResolutionScaleFactor();
 

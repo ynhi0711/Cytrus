@@ -22,20 +22,58 @@ SERIALIZE_EXPORT_IMPL(Kernel::AddressArbiter::Callback)
 
 namespace Kernel {
 
+// xappify fork: `waiting_threads` must never contain a thread that is not actually parked in
+// WaitArb. Upstream asserts that invariant in the two partition lambdas below — but `ASSERT_MSG` is
+// compiled out of the -O2 release core this app ships, so a violation was silently tolerated and
+// produced a permanently lost wakeup instead of a crash. The root cause (a stale wakeup timer
+// resuming a thread out of its arbiter wait) is fixed in `Thread::ResumeFromWait`; these two helpers
+// make the list self-repairing, and — more usefully — make any remaining violation say so in the log.
+namespace {
+/// Rate-limited so a persistent violation cannot itself become the performance problem.
+void ReportStaleWaiter(const Thread& thread, VAddr address) {
+    static u32 reports = 0;
+    constexpr u32 max_reports = 10;
+    if (reports++ >= max_reports) {
+        return;
+    }
+    LOG_CRITICAL(Kernel,
+                 "[arbiter] stale waiter tid={} status={} wait_address={:#010x} (signalling {:#010x})"
+                 " — dropping it; see Thread::ResumeFromWait",
+                 thread.thread_id, static_cast<int>(thread.status), thread.wait_address, address);
+}
+} // Anonymous namespace
+
 void AddressArbiter::WaitThread(std::shared_ptr<Thread> thread, VAddr wait_address) {
+    // A thread already in the list would mean a previous wait ended without removing it — pushing
+    // again would create a duplicate, and every duplicate is one wakeup that some other thread never
+    // receives. Cheap: the list is a handful of entries.
+    waiting_threads.erase(std::remove(waiting_threads.begin(), waiting_threads.end(), thread),
+                          waiting_threads.end());
+
     thread->wait_address = wait_address;
     thread->status = ThreadStatus::WaitArb;
     waiting_threads.emplace_back(std::move(thread));
 }
 
+void AddressArbiter::PruneStaleWaiters(VAddr address) {
+    const auto stale = std::remove_if(waiting_threads.begin(), waiting_threads.end(),
+                                      [address](const auto& thread) {
+                                          if (thread->status == ThreadStatus::WaitArb) {
+                                              return false;
+                                          }
+                                          ReportStaleWaiter(*thread, address);
+                                          return true;
+                                      });
+    waiting_threads.erase(stale, waiting_threads.end());
+}
+
 u64 AddressArbiter::ResumeAllThreads(VAddr address) {
+    PruneStaleWaiters(address);
+
     // Determine which threads are waiting on this address, those should be woken up.
-    auto itr = std::stable_partition(waiting_threads.begin(), waiting_threads.end(),
-                                     [address](const auto& thread) {
-                                         ASSERT_MSG(thread->status == ThreadStatus::WaitArb,
-                                                    "Inconsistent AddressArbiter state");
-                                         return thread->wait_address != address;
-                                     });
+    auto itr = std::stable_partition(
+        waiting_threads.begin(), waiting_threads.end(),
+        [address](const auto& thread) { return thread->wait_address != address; });
 
     // Wake up all the found threads
     const u64 num_threads = std::distance(itr, waiting_threads.end());
@@ -47,13 +85,15 @@ u64 AddressArbiter::ResumeAllThreads(VAddr address) {
 }
 
 bool AddressArbiter::ResumeHighestPriorityThread(VAddr address) {
+    // Before selecting: this picks the numerically LOWEST priority, so a stale entry for a
+    // high-priority thread (the guest's GSP thread sits at 26) would win every selection and consume
+    // the wakeup that a genuinely parked thread was owed.
+    PruneStaleWaiters(address);
+
     // Determine which threads are waiting on this address, those should be considered for wakeup.
     auto matches_start = std::stable_partition(
-        waiting_threads.begin(), waiting_threads.end(), [address](const auto& thread) {
-            ASSERT_MSG(thread->status == ThreadStatus::WaitArb,
-                       "Inconsistent AddressArbiter state");
-            return thread->wait_address != address;
-        });
+        waiting_threads.begin(), waiting_threads.end(),
+        [address](const auto& thread) { return thread->wait_address != address; });
 
     // Iterate through threads, find highest priority thread that is waiting to be arbitrated.
     // Note: The real kernel will pick the first thread in the list if more than one have the

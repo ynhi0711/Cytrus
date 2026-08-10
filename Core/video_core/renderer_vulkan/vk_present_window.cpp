@@ -284,15 +284,25 @@ Frame* PresentWindow::GetRenderFrame() {
     vk::Device device = instance.GetDevice();
     vk::Result result{};
 
+    // xappify fork: bounded per attempt. This used to pass UINT64_MAX, so a `present_done` that was
+    // never signalled — a frame recycled without being presented, see `RetirePresentedFrame` —
+    // blocked the EMULATION thread here forever with no log line to say so. One second per attempt
+    // costs nothing on the normal path (the fence is signalled within a frame) and makes the
+    // pathological case announce itself.
+    static constexpr u64 fence_wait_timeout_ns = 1'000'000'000;
     const auto wait = [&]() {
-        result = device.waitForFences(frame->present_done, false, std::numeric_limits<u64>::max());
+        result = device.waitForFences(frame->present_done, false, fence_wait_timeout_ns);
         return result;
     };
 
     // Wait for the presentation to be finished so all frame resources are free
-    while (wait() != vk::Result::eSuccess) {
+    for (u32 waited = 0; wait() != vk::Result::eSuccess; ++waited) {
         // Retry if the waiting times out
         if (result == vk::Result::eTimeout) {
+            LOG_CRITICAL(Render_Vulkan,
+                         "Frame fence still unsignalled after {}s — a frame was recycled without "
+                         "being presented or the GPU is not progressing",
+                         waited + 1);
             continue;
         }
 
@@ -401,16 +411,46 @@ void PresentWindow::ResumePresentation() {
     NotifySurfaceChanged();
 }
 
+void PresentWindow::RetirePresentedFrame(Frame* frame) {
+    // xappify fork. `GetRenderFrame` hands out a frame only after `waitForFences(present_done)`
+    // succeeds, then resets the fence — so whoever takes the frame OWES it a signal. On the normal
+    // path that comes from `graphics_queue.submit(submit_info, frame->present_done)`.
+    //
+    // `CopyToSwapchain`'s two bail-out paths (presentation suspended; the acquire exhausted its
+    // retries) return before that submit, while their callers still push the frame back onto
+    // `free_queue`. Without this, the next `GetRenderFrame` to draw that frame blocks in
+    // `waitForFences(..., UINT64_MAX)` on a fence nothing will ever signal — a permanent hang of the
+    // EMULATION thread, which is the exact failure the bounded waits elsewhere in this file exist to
+    // prevent. Signal it with an empty submit so the frame is genuinely reusable.
+    // Same lock order as the normal path and as `recreate_swapchain` (swapchain_mutex, held by our
+    // caller, then submit_mutex).
+    const std::scoped_lock submit_lock{scheduler.submit_mutex};
+    try {
+        // No batches — `vkQueueSubmit(queue, 0, nullptr, fence)`. Signals the fence once work already
+        // on the queue completes, which is exactly the guarantee `GetRenderFrame` waits for.
+        graphics_queue.submit(nullptr, frame->present_done);
+    } catch (const vk::SystemError& err) {
+        // Nothing left to try — but say so, because the symptom downstream would be a silent hang.
+        LOG_CRITICAL(Render_Vulkan, "Failed to retire an unpresented frame's fence: {}", err.what());
+    }
+}
+
 void PresentWindow::CopyToSwapchain(Frame* frame) {
     // xappify fork: while suspended, do not touch the surface at all. Returning immediately is all
     // that is needed — BOTH callers (`PresentThread` and the `!use_present_thread` branch of
     // `Present`) push the frame back onto `free_queue` themselves, so recycling it here as well
     // would enqueue the same frame twice. See SuspendPresentation.
     if (presentation_suspended.load(std::memory_order_relaxed)) [[unlikely]] {
+        RetirePresentedFrame(frame);
         return;
     }
 
-    const auto recreate_swapchain = [&] {
+    // xappify fork: every rebuild is a `graphics_queue.waitIdle()` plus a full teardown/create, taken
+    // on the present thread while `swapchain_mutex` is held — i.e. it stalls the emulation thread in
+    // `GetRenderFrame`. It used to happen roughly once a second on device with nothing in the app
+    // able to see it. Name the reason and count them so the next capture measures the thrash instead
+    // of us inferring it from `[mvk-info]` console spam.
+    const auto recreate_swapchain = [&](const char* reason) {
 #ifdef ANDROID
         {
             std::unique_lock lock{recreate_surface_mutex};
@@ -418,9 +458,19 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
             surface = next_surface;
         }
 #endif
-        std::scoped_lock submit_lock{scheduler.submit_mutex};
-        graphics_queue.waitIdle();
-        swapchain.Create(frame->width, frame->height, surface, low_refresh_rate);
+        {
+            std::scoped_lock submit_lock{scheduler.submit_mutex};
+            graphics_queue.waitIdle();
+            swapchain.Create(frame->width, frame->height, surface, low_refresh_rate);
+        }
+
+        // Rate-limited: if the thrash ever comes back, this must not become the thing that causes it.
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_recreate_log >= std::chrono::seconds{1}) {
+            last_recreate_log = now;
+            LOG_INFO(Render_Vulkan, "Swapchain recreated (reason={}, total={})", reason,
+                     swapchain.GetRecreations());
+        }
     };
 
 #ifndef ANDROID
@@ -431,9 +481,15 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
     // A runtime frame-limit change (e.g. toggling fast-forward) can flip the desired present mode
     // between FIFO and Mailbox/Immediate; recreate so the emulation loop unlocks past vblank.
     const bool present_mode_changed = swapchain.NeedsPresentModeUpdate();
-    if (vsync_changed || size_changed || present_mode_changed) [[unlikely]] {
+    // Drained unconditionally (not short-circuited by the checks above) so the flag never survives
+    // into a later frame and triggers a rebuild that has nothing to do with it.
+    const bool suboptimal_extent = swapchain.ConsumeSuboptimal();
+    if (vsync_changed || size_changed || present_mode_changed || suboptimal_extent) [[unlikely]] {
         vsync_enabled = use_vsync;
-        recreate_swapchain();
+        recreate_swapchain(size_changed            ? "size"
+                           : vsync_changed         ? "vsync"
+                           : present_mode_changed  ? "present-mode"
+                                                   : "suboptimal-extent");
     }
 #endif
 
@@ -449,7 +505,10 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
             acquired = true;
             break;
         }
-        recreate_swapchain();
+        // Only eErrorOutOfDateKHR / eErrorSurfaceLostKHR / an explicit MarkNeedsRecreation reach
+        // here now — eSuboptimalKHR acquires successfully and is handled above. Which of the three
+        // it was matters: they have different fixes, and a plain "acquire-failed" cost a round.
+        recreate_swapchain(swapchain.LastAcquireFailure());
     }
     if (!acquired) [[unlikely]] {
         LOG_CRITICAL(Render_Vulkan,
@@ -457,6 +516,7 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
                      max_acquire_attempts);
         // Return WITHOUT presenting; the caller recycles the frame, so the emulation thread keeps
         // getting frames and the next pass retries the acquire from scratch.
+        RetirePresentedFrame(frame);
         return;
     }
 

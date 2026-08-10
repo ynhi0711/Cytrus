@@ -316,6 +316,28 @@ void Thread::ResumeFromWait() {
 
     wakeup_callback = nullptr;
 
+    // xappify fork: cancel the timeout that belonged to the wait we are LEAVING.
+    //
+    // `WakeAfterDelay` schedules a `ThreadWakeupEventType` event keyed by `thread_id`, and upstream
+    // only ever unschedules it in `Stop()`. So every timed wait satisfied BEFORE its timeout —
+    // svcWaitSynchronization1/N, svcSleepThread, the arbiter's *WithTimeout variants — used to leave
+    // a live timer behind. When it later fired, `ThreadWakeupCallback` found this thread in whatever
+    // wait it had since entered (it accepts WaitSynchAny/All/Arb/HleEvent) and force-resumed it out
+    // of that one.
+    //
+    // The damaging case is an untimed `ArbitrationType::WaitIfLessThan`: it installs NO
+    // `wakeup_callback`, so `AddressArbiter::WakeUp` never ran and the thread stayed in the
+    // arbiter's `waiting_threads` while running. Re-entering the same wait then pushed a DUPLICATE,
+    // and `ResumeHighestPriorityThread` — which picks the numerically lowest priority — kept
+    // selecting the zombie entry, burning the wakeup and parking the real waiter forever. Observed
+    // on device as a wedged title: the GSP thread (prio 26) stuck in WaitArb while another thread
+    // spun on a flag it was supposed to set, with the interrupt relay queue pinned full.
+    //
+    // Safe to call from inside the wakeup callback: `Timing::Timer::Advance` pops each event before
+    // dispatching it, so the firing event is already out of the queue. No-ops while the event queue
+    // is locked (serialization), which is fine — `ScheduleEvent` is locked out over the same window.
+    thread_manager.kernel.timing.UnscheduleEvent(thread_manager.ThreadWakeupEventType, thread_id);
+
     thread_manager.ready_queue.push_back(current_priority, this);
     status = ThreadStatus::Ready;
     thread_manager.kernel.PrepareReschedule();

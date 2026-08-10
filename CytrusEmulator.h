@@ -218,6 +218,15 @@ NS_ASSUME_NONNULL_BEGIN
 /// was read too early" are indistinguishable, which has already cost a debugging round.
 -(uint64_t) guestStateDumps;
 
+/// Total swapchain rebuilds this session (see `RendererBase::GetSwapchainRecreations`).
+///
+/// Sample it alongside `runLoopReturns`: a rebuild takes a queue `waitIdle` under the swapchain
+/// lock, so the emulation thread stalls in `GetRenderFrame` for the duration. A run where this
+/// climbs steadily has a PRESENTATION problem, and no frame counter says so on its own — the only
+/// previous evidence was `[mvk-info]` console spam, which is invisible without Xcode attached.
+/// Expect single digits for a whole session: boot, rotations, and foreground returns.
+-(uint64_t) swapchainRecreations;
+
 // xappify fork — app lifecycle. Call `suspendPresentation` BEFORE backgrounding and
 // `resumePresentation` after returning to the foreground.
 //

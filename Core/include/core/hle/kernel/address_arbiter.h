@@ -61,6 +61,13 @@ private:
     /// Puts the thread to wait on the specified arbitration address under this address arbiter.
     void WaitThread(std::shared_ptr<Thread> thread, VAddr wait_address);
 
+    /// xappify fork: drops (and logs) any entry that is no longer parked in `WaitArb`.
+    ///
+    /// Such an entry is a lost wakeup waiting to happen — the resume helpers below consume one
+    /// wakeup per entry they select, so a zombie silently steals it from a thread that is genuinely
+    /// blocked. Upstream asserted this invariant instead, which is compiled out at -O2.
+    void PruneStaleWaiters(VAddr address);
+
     /// Resume all threads found to be waiting on the address under this address arbiter
     u64 ResumeAllThreads(VAddr address);
 

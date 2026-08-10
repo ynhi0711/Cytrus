@@ -309,6 +309,21 @@ public:
      */
     void LogGuestThreadState(const char* marker) const;
 
+    /**
+     * xappify fork: records the currently-scheduled guest thread's PC into a ring buffer.
+     *
+     * Call once per emulation-loop iteration; it records the scheduled thread on EVERY core, so a
+     * 2-core session contributes two entries a pass. `LogGuestThreadState`'s per-thread `pc=` is a single
+     * instant, which cannot tell a thread spinning in a five-instruction poll loop from one running
+     * normally — and that is precisely the question a "the title wedged" capture has to answer. A
+     * few thousand samples a second, dumped as a frequency histogram, answers it: a handful of
+     * distinct PCs is a spin (and names the loop), a wide spread is real progress.
+     *
+     * Emulation-thread only, and deliberately cheap enough to run unconditionally — two stores and
+     * an increment, against a `RunLoop` that executes thousands of guest instructions.
+     */
+    void SamplePc();
+
     ThreadManager& GetCurrentThreadManager();
     const ThreadManager& GetCurrentThreadManager() const;
 
@@ -428,6 +443,18 @@ private:
     std::vector<std::shared_ptr<Process>> stored_processes;
 
     std::vector<std::unique_ptr<ThreadManager>> thread_managers;
+
+    /// xappify fork: see `SamplePc`. Sized so that at the observed 900–4000 loop iterations/s (times
+    /// one entry per core) it covers roughly the last half-second to two seconds — long enough to
+    /// characterise a spin, short enough that the whole window is recent.
+    struct PcSample {
+        u32 thread_id;
+        u32 pc;
+    };
+    static constexpr std::size_t PcSampleCount = 4096;
+    std::array<PcSample, PcSampleCount> pc_samples{};
+    std::size_t pc_sample_head = 0;
+    std::size_t pc_samples_taken = 0;
 
     std::shared_ptr<ConfigMem::Handler> config_mem_handler;
     std::shared_ptr<SharedPage::Handler> shared_page_handler;

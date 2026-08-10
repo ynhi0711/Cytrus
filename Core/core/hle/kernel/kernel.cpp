@@ -2,6 +2,9 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm> // xappify fork: LogGuestThreadState
+#include <map>       // xappify fork: LogGuestThreadState
+#include <utility>   // xappify fork: LogGuestThreadState
 #include <boost/serialization/shared_ptr.hpp>
 #include <boost/serialization/unordered_map.hpp>
 #include <boost/serialization/vector.hpp>
@@ -152,9 +155,65 @@ const char* ThreadStatusName(ThreadStatus status) {
 }
 } // Anonymous namespace
 
+// xappify fork — see the header.
+void KernelSystem::SamplePc() {
+    for (const auto& manager : thread_managers) {
+        const Thread* current = manager->GetCurrentThread();
+        if (current == nullptr) {
+            continue;
+        }
+        pc_samples[pc_sample_head] = {current->thread_id,
+                                      static_cast<u32>(current->context.GetProgramCounter())};
+        pc_sample_head = (pc_sample_head + 1) % PcSampleCount;
+        ++pc_samples_taken;
+    }
+}
+
+/// Renders the PC ring as a frequency histogram: how many samples, over how many distinct PCs, and
+/// the hottest few. Kept local to the dump — nothing else has a use for it.
+static std::string SummarisePcSamples(const std::vector<std::pair<u32, u32>>& samples) {
+    if (samples.empty()) {
+        return "no samples";
+    }
+
+    std::map<u32, u32> counts; // pc -> hits
+    for (const auto& [pc, hits] : samples) {
+        counts[pc] += hits;
+    }
+
+    std::vector<std::pair<u32, u32>> ranked{counts.begin(), counts.end()};
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    std::size_t total = 0;
+    for (const auto& [pc, hits] : ranked) {
+        total += hits;
+    }
+
+    std::string hottest;
+    for (std::size_t i = 0; i < ranked.size() && i < 6; ++i) {
+        if (!hottest.empty()) {
+            hottest += " ";
+        }
+        hottest += fmt::format("{:#010x}x{}", ranked[i].first, ranked[i].second);
+    }
+
+    return fmt::format("samples={} distinctPCs={} hottest=[{}]", total, ranked.size(), hottest);
+}
+
 // xappify fork — see the header for why this exists and why it is emulation-thread only.
 void KernelSystem::LogGuestThreadState(const char* marker) const {
-    LOG_CRITICAL(Kernel, "[guest-state] {} BEGIN cores={}", marker, thread_managers.size());
+    LOG_CRITICAL(Kernel, "[guest-state] {} BEGIN cores={} pcSamplesTaken={}", marker,
+                 thread_managers.size(), pc_samples_taken);
+
+    // Bucket the ring by thread so each thread's line below can carry its own spin signature.
+    // Only the filled part of the ring is valid before it has wrapped once.
+    const std::size_t valid = std::min(pc_samples_taken, PcSampleCount);
+    std::map<u32, std::vector<std::pair<u32, u32>>> samples_by_thread;
+    for (std::size_t i = 0; i < valid; ++i) {
+        const auto& sample = pc_samples[(pc_sample_head + PcSampleCount - 1 - i) % PcSampleCount];
+        samples_by_thread[sample.thread_id].emplace_back(sample.pc, 1u);
+    }
 
     for (u32 core_id = 0; core_id < thread_managers.size(); ++core_id) {
         const ThreadManager& manager = *thread_managers[core_id];
@@ -185,13 +244,23 @@ void KernelSystem::LogGuestThreadState(const char* marker) const {
                 waiting_on = fmt::format("AddressArbiter @ {:#010x}", thread->wait_address);
             }
 
+            // The PC histogram is what separates "spinning in a poll loop" from "running normally"
+            // — the single `pc=` below is one instant and cannot. Only threads that were actually
+            // scheduled recently have samples; the rest report none, which is itself informative.
+            const auto samples = samples_by_thread.find(thread->thread_id);
+            const std::string pc_summary = samples == samples_by_thread.end()
+                                               ? std::string{"no samples"}
+                                               : SummarisePcSamples(samples->second);
+
             LOG_CRITICAL(Kernel,
                          "[guest-state] {} core={} tid={} name=\"{}\" status={} prio={} "
-                         "pc={:#010x} current={} heldMutexes={} pendingMutexes={} waiting-on=[{}]",
+                         "pc={:#010x} current={} heldMutexes={} pendingMutexes={} waiting-on=[{}] "
+                         "{}",
                          marker, core_id, thread->thread_id, thread->name,
                          ThreadStatusName(thread->status), thread->current_priority,
                          thread->context.GetProgramCounter(), thread.get() == current ? 1 : 0,
-                         thread->held_mutexes.size(), thread->pending_mutexes.size(), waiting_on);
+                         thread->held_mutexes.size(), thread->pending_mutexes.size(), waiting_on,
+                         pc_summary);
         }
     }
 

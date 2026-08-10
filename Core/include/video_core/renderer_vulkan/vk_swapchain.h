@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <vector>
 #include "common/common_types.h"
@@ -80,6 +81,33 @@ public:
     /// `PresentWindow::NotifySurfaceChanged`.
     void MarkNeedsRecreation() {
         needs_recreation = true;
+        last_acquire_failure = "marked";
+    }
+
+    /// Why the last `AcquireNextImage` returned false: `out-of-date`, `surface-lost` or `marked`.
+    /// The caller puts it in the recreation log — "acquire-failed" alone cannot distinguish a stale
+    /// surface from MoltenVK refusing to vend a drawable, and those need different fixes.
+    [[nodiscard]] const char* LastAcquireFailure() const {
+        return last_acquire_failure;
+    }
+
+    /// xappify fork: answers "did the driver's `eSuboptimalKHR` actually mean anything?", and clears
+    /// the flag either way.
+    ///
+    /// Suboptimal is a SUCCESS code — the image was acquired and its semaphore signalled — so unlike
+    /// `eErrorOutOfDateKHR` it does not oblige us to rebuild. MoltenVK returns it routinely for
+    /// conditions a rebuild cannot fix, and the old code treated the two identically: every
+    /// Suboptimal dropped the frame and cost a full `graphics_queue.waitIdle()` + teardown +
+    /// re-create. On device that latched into a rebuild roughly every second for minutes at a time
+    /// and took the emulation loop from ~3600 to ~500 iterations/s. Only a genuine extent change
+    /// justifies the rebuild, and that is the one thing worth re-querying the surface for.
+    [[nodiscard]] bool ConsumeSuboptimal();
+
+    /// Total `Create()` calls this session, including the first. Polled by the frontend's liveness
+    /// heartbeat — recreation thrash is invisible from outside otherwise (its only trace was
+    /// `[mvk-info]` console spam, which does not survive a detached debugger).
+    [[nodiscard]] u64 GetRecreations() const {
+        return recreations.load(std::memory_order_relaxed);
     }
 
 private:
@@ -123,6 +151,11 @@ private:
     u32 image_index = 0;
     u32 frame_index = 0;
     bool needs_recreation = true;
+    // Set by an acquire or present that returned eSuboptimalKHR; drained by ConsumeSuboptimal().
+    bool suboptimal = false;
+    // Static string literal, so it is safe to hand out and cheap to store.
+    const char* last_acquire_failure = "none";
+    std::atomic<u64> recreations{0};
     bool low_refresh_rate;
     // Device present-mode availability, cached by SetPresentMode() so NeedsPresentModeUpdate()
     // can recompute the desired mode without re-querying the surface every frame.

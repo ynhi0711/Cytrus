@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
@@ -80,10 +81,19 @@ public:
         return swapchain.GetImageCount();
     }
 
+    /// xappify fork: total swapchain rebuilds this session. See `Swapchain::GetRecreations`.
+    [[nodiscard]] u64 SwapchainRecreations() const noexcept {
+        return swapchain.GetRecreations();
+    }
+
 private:
     void PresentThread(std::stop_token token);
 
     void CopyToSwapchain(Frame* frame);
+
+    /// xappify fork: signals `frame->present_done` for a frame that is being recycled WITHOUT having
+    /// been presented. See the implementation — skipping this hangs the emulation thread forever.
+    void RetirePresentedFrame(Frame* frame);
 
     vk::RenderPass CreateRenderpass();
 
@@ -116,6 +126,8 @@ private:
     /// xappify fork: see SuspendPresentation. Atomic because the present thread reads it while the
     /// UI thread writes it, with no lock in common.
     std::atomic_bool presentation_suspended{false};
+    /// Rate limiter for the swapchain-recreation log. Present-thread only.
+    std::chrono::steady_clock::time_point last_recreate_log{};
 };
 
 } // namespace Vulkan

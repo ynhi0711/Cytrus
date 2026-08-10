@@ -1467,4 +1467,14 @@ void RendererVulkan::ResumePresentation() {
     }
 }
 
+u64 RendererVulkan::GetSwapchainRecreations() const {
+    // Summed rather than reported per window: the frontend wants one "is presentation thrashing?"
+    // number, and either window thrashing stalls the same emulation thread.
+    u64 total = main_present_window.SwapchainRecreations();
+    if (secondary_present_window_ptr) {
+        total += secondary_present_window_ptr->SwapchainRecreations();
+    }
+    return total;
+}
+
 } // namespace Vulkan

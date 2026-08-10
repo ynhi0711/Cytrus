@@ -350,14 +350,35 @@ void GSP_GPU::SignalInterruptForThread(InterruptId interrupt_id, u32 thread_id) 
     }
 
     auto* interrupt_relay_queue = GetInterruptRelayQueue(thread_id);
-    u8 next = interrupt_relay_queue->index;
-    next += interrupt_relay_queue->number_interrupts;
-    next = next % 0x34; // 0x34 is the number of interrupt slots
+    constexpr u8 num_slots = 0x34; // Number of interrupt slots in the queue
 
-    interrupt_relay_queue->number_interrupts += 1;
+    // xappify fork: CLAMPED. Upstream (Citra and Azahar both) increments `number_interrupts`
+    // unconditionally — but it is a `u8` indexing `slot[0x34]`, so a guest that stops draining the
+    // queue makes the count run past the slot array, wrap at 256, and overwrite live slots. What the
+    // guest reads afterwards is neither a valid count nor valid interrupt IDs, and it never recovers.
+    //
+    // That is a strong candidate for why the observed 3DS freeze is PERMANENT: a stall that should
+    // have cost a few dropped frames instead corrupts the queue for the rest of the session. Record
+    // the drop in the fields the struct already carries for it (see `gsp_interrupt.h`) rather than
+    // corrupting state the guest is about to read.
+    if (interrupt_relay_queue->number_interrupts < num_slots) {
+        u8 next = interrupt_relay_queue->index;
+        next += interrupt_relay_queue->number_interrupts;
+        next = next % num_slots;
 
-    interrupt_relay_queue->slot[next] = interrupt_id;
-    interrupt_relay_queue->error_code = 0x0; // No error
+        interrupt_relay_queue->number_interrupts += 1;
+
+        interrupt_relay_queue->slot[next] = interrupt_id;
+        interrupt_relay_queue->error_code = 0x0; // No error
+    } else {
+        // The guest has stopped consuming. Drop this interrupt and count it; `LogState` reports
+        // these, so a wedge capture says outright whether the queue backed up.
+        if (interrupt_id == InterruptId::PDC0) {
+            interrupt_relay_queue->missed_PDC0 += 1;
+        } else if (interrupt_id == InterruptId::PDC1) {
+            interrupt_relay_queue->missed_PDC1 += 1;
+        }
+    }
 
     // Update framebuffer information if requested
     const s32 screen_id = (interrupt_id == InterruptId::PDC0)   ? 0
@@ -375,6 +396,13 @@ void GSP_GPU::SignalInterruptForThread(InterruptId interrupt_id, u32 thread_id) 
 }
 
 void GSP_GPU::SignalInterrupt(InterruptId interrupt_id) {
+    // xappify fork: counted BEFORE the shared-memory guard, so "the emulator stopped producing this
+    // interrupt" and "it produced it but could not deliver it" stay distinguishable. See LogState.
+    const auto index = static_cast<std::size_t>(interrupt_id);
+    if (index < interrupts_signalled.size()) {
+        interrupts_signalled[index] += 1;
+    }
+
     if (nullptr == shared_memory) {
         LOG_WARNING(Service_GSP, "cannot synchronize until GSP shared memory has been created!");
         return;
@@ -396,6 +424,63 @@ void GSP_GPU::SignalInterrupt(InterruptId interrupt_id) {
     }
 
     SignalInterruptForThread(interrupt_id, active_thread_id);
+}
+
+// xappify fork — see the header for what each line is for.
+void GSP_GPU::LogState(const char* marker) {
+    static constexpr std::array<const char*, 7> interrupt_names = {
+        "PSC0", "PSC1", "PDC0", "PDC1", "PPF", "P3D", "DMA",
+    };
+
+    std::string signalled;
+    for (std::size_t i = 0; i < interrupts_signalled.size(); ++i) {
+        if (!signalled.empty()) {
+            signalled += " ";
+        }
+        signalled += fmt::format("{}={}", interrupt_names[i], interrupts_signalled[i]);
+    }
+
+    LOG_CRITICAL(Service_GSP, "[gsp-state] {} BEGIN activeThread={} activeClientThread={} {}",
+                 marker, active_thread_id, active_client_thread_id, signalled);
+
+    if (shared_memory == nullptr) {
+        // Nothing below is readable; say so rather than emitting a block of zeroes that reads like
+        // a healthy-but-idle GSP.
+        LOG_CRITICAL(Service_GSP, "[gsp-state] {} no shared memory — GSP never initialised", marker);
+        LOG_CRITICAL(Service_GSP, "[gsp-state] {} END", marker);
+        return;
+    }
+
+    for (u32 thread_id = 0; thread_id < MaxGSPThreads; ++thread_id) {
+        if (!used_thread_ids[thread_id]) {
+            continue;
+        }
+
+        const auto* queue = GetInterruptRelayQueue(thread_id);
+        const bool registered = FindRegisteredThreadData(thread_id) != nullptr;
+
+        // `number_interrupts` at the 0x34 cap means the guest has stopped draining — the single most
+        // important number here, and what the clamp in SignalInterruptForThread protects.
+        LOG_CRITICAL(Service_GSP,
+                     "[gsp-state] {} thread={} registered={} queue.index={} "
+                     "queue.pending={} queue.error={:#04x} missedPDC0={} missedPDC1={}",
+                     marker, thread_id, registered, queue->index, queue->number_interrupts,
+                     queue->error_code, queue->missed_PDC0, queue->missed_PDC1);
+
+        for (u32 screen_id = 0; screen_id < 2; ++screen_id) {
+            const auto* info = GetFrameBufferInfo(thread_id, screen_id);
+            const auto& fb = info->framebuffer_info[info->index];
+            // is_dirty is what the guest sets to publish a new frame; SignalInterruptForThread
+            // consumes it into GPU::SetBufferSwap, which is what `gameFrames` counts.
+            LOG_CRITICAL(Service_GSP,
+                         "[gsp-state] {} thread={} screen={} isDirty={} index={} "
+                         "left={:#010x} right={:#010x} stride={} format={:#x}",
+                         marker, thread_id, screen_id, info->is_dirty.Value(), info->index.Value(),
+                         fb.address_left, fb.address_right, fb.stride, fb.format);
+        }
+    }
+
+    LOG_CRITICAL(Service_GSP, "[gsp-state] {} END", marker);
 }
 
 void GSP_GPU::SetLcdForceBlack(Kernel::HLERequestContext& ctx) {

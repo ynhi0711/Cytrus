@@ -82,6 +82,7 @@ public:
 
     void SuspendPresentation() override;
     void ResumePresentation() override;
+    [[nodiscard]] u64 GetSwapchainRecreations() const override;
 
     void SwapBuffers() override;
     void TryPresent(int timeout_ms, bool is_secondary) override {}

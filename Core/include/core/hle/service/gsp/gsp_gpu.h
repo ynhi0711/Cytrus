@@ -136,6 +136,25 @@ public:
         return active_client_thread_id;
     }
 
+    /**
+     * xappify fork: logs the whole GSP↔guest boundary for a freeze capture.
+     *
+     * This is the probe that separates the two shapes of a "guest wedged" freeze, which look
+     * identical from the frontend (`gameFrames` flat, `systemFrames` climbing) and need opposite
+     * fixes:
+     *
+     *   - The EMULATOR stopped delivering something. Visible as an interrupt ID whose counter has
+     *     gone flat while PDC0/PDC1 keep climbing (P3D → command lists, PPF → display transfers), or
+     *     as a relay queue that is full with `missed_PDC*` climbing.
+     *   - The TITLE soft-locked on its own. Every counter still climbing, the queue draining
+     *     normally, and `is_dirty` simply never set again.
+     *
+     * Emulation-thread only, same as `KernelSystem::LogGuestThreadState` — it reads shared memory
+     * the guest is actively writing. Output goes to the core log; read it back with the frontend's
+     * log tail dump.
+     */
+    void LogState(const char* marker);
+
 private:
     /**
      * Signals that the specified interrupt type has occurred to userland code for the specified GSP
@@ -404,6 +423,11 @@ private:
 
     /// Thread ids currently in use by the sessions connected to the GSPGPU service.
     std::array<bool, MaxGSPThreads> used_thread_ids{};
+
+    /// xappify fork: interrupts signalled this session, indexed by InterruptId (PSC0..DMA).
+    /// Deliberately NOT serialized — a savestate load restarts the session's diagnostics, exactly
+    /// like the PerfStats counters do.
+    std::array<u64, 7> interrupts_signalled{};
 
     friend class SessionData;
 

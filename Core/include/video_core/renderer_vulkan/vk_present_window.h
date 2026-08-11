@@ -86,13 +86,21 @@ public:
         return swapchain.GetRecreations();
     }
 
+    /// xappify fork: one `[present-state]` log line — queue depths, both suspend flags, who last
+    /// suspended, retired-frame count. Called from the emulation-thread wedge dump; takes
+    /// `free_mutex` then `queue_mutex` sequentially (never nested) and touches neither
+    /// `swapchain_mutex` nor `submit_mutex`, so it cannot deadlock against the present thread.
+    void LogPresentState(const char* marker);
+
 private:
     void PresentThread(std::stop_token token);
 
     void CopyToSwapchain(Frame* frame);
 
-    /// xappify fork: signals `frame->present_done` for a frame that is being recycled WITHOUT having
-    /// been presented. See the implementation — skipping this hangs the emulation thread forever.
+    /// xappify fork: settles a frame that is being recycled WITHOUT having been presented — signals
+    /// its `present_done` fence AND consumes its pending `render_ready` signal. See the
+    /// implementation for the invariant; skipping this hangs the emulation thread forever, and
+    /// skipping only the semaphore half wedges MoltenVK slowly (leaked binary-semaphore signals).
     void RetirePresentedFrame(Frame* frame);
 
     vk::RenderPass CreateRenderpass();
@@ -124,8 +132,23 @@ private:
     bool use_present_thread{true};
     void* last_render_surface{};
     /// xappify fork: see SuspendPresentation. Atomic because the present thread reads it while the
-    /// UI thread writes it, with no lock in common.
+    /// UI thread writes it, with no lock in common. LIFECYCLE ownership only — the app sets it on
+    /// resign-active and clears it on become-active. The starvation self-defence has its own flag
+    /// below; folding them into one bit is what once left presentation dead for a whole session
+    /// after a foreground hitch (nothing ever called ResumePresentation to clear it).
     std::atomic_bool presentation_suspended{false};
+    /// xappify fork: set by `GetRenderFrame` after 5 s of frame starvation so `CopyToSwapchain`
+    /// drains in-flight frames straight back to `free_queue`; cleared by `GetRenderFrame` itself the
+    /// moment the starvation is over (and by ResumePresentation, as a clean slate). Distinct from
+    /// the lifecycle flag above — different owner, different clear condition.
+    std::atomic_bool starvation_suspended{false};
+    /// xappify fork: who last suspended presentation — 0 none, 1 lifecycle, 2 starvation. Purely for
+    /// the `[present-state]` dump line.
+    std::atomic<u8> last_suspend_source{0};
+    /// xappify fork: frames settled by `RetirePresentedFrame` instead of being presented. A healthy
+    /// session shows a few per background trip; a climb during foreground play means frames are
+    /// being dropped on the floor.
+    std::atomic<u64> retired_frames{0};
     /// Rate limiter for the swapchain-recreation log. Present-thread only.
     std::chrono::steady_clock::time_point last_recreate_log{};
 };

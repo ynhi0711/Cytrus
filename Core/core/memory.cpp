@@ -156,6 +156,32 @@ public:
         return system.GetRunningCore().GetPC();
     }
 
+    /// xappify fork: guest write-watch. Disarmed (`watch_len == 0`) unless the frontend arms it, so
+    /// the cost in `Write<T>`'s hot path is one compare against a member that is nearly always zero.
+    ///
+    /// Exists because the 3DS freeze was traced to a corrupted node in the guest's LINEAR heap — a
+    /// linked-list `next` pointer overwritten with its own address, which makes the title's
+    /// list walk loop forever. The wedge dump names the address; this says who wrote it.
+    ///
+    /// LIMITATION, and it matters when reading a capture: this only sees writes that go through
+    /// `MemorySystem::Write<T>`, i.e. guest stores. HLE code that writes through a raw `GetPointer`
+    /// (GSP, DSP, rasterizer flushes) bypasses it entirely. So a watch that never fires while the
+    /// value still changes is not a dead end — it is positive evidence that an HLE path did it.
+    u32 watch_addr = 0;
+    u32 watch_len = 0;
+    u32 watch_hits = 0;
+
+    void ReportWatchHit(VAddr vaddr, u64 data, std::size_t width) {
+        // Rate-limited: a watch armed on a hot field must not itself become the stall.
+        constexpr u32 max_hits = 64;
+        if (watch_hits++ >= max_hits) {
+            return;
+        }
+        LOG_CRITICAL(HW_Memory,
+                     "[mem-watch] write{} addr={:#010x} value={:#010x} pc={:#010x} hit={}",
+                     width * 8, vaddr, data, GetPC(), watch_hits);
+    }
+
     template <bool UNSAFE>
     void ReadBlockImpl(const Kernel::Process& process, const VAddr src_addr, void* dest_buffer,
                        const std::size_t size) {
@@ -500,6 +526,13 @@ T MemorySystem::Read(const std::shared_ptr<PageTable>& page_table, const VAddr v
 template <typename T>
 void MemorySystem::Write(const std::shared_ptr<PageTable>& page_table, const VAddr vaddr,
                          const T data) {
+    // xappify fork: see `Impl::watch_addr`. Disarmed this is one compare against a zero member,
+    // ahead of the fast path rather than inside it so that block stays untouched.
+    if (impl->watch_len != 0 && vaddr >= impl->watch_addr &&
+        vaddr < impl->watch_addr + impl->watch_len) [[unlikely]] {
+        impl->ReportWatchHit(vaddr, static_cast<u64>(data), sizeof(T));
+    }
+
     u8* page_pointer = page_table->pointers[vaddr >> CITRA_PAGE_BITS];
     if (page_pointer) {
         // NOTE: Avoid adding any extra logic to this fast-path block
@@ -731,6 +764,16 @@ std::vector<VAddr> MemorySystem::PhysicalToVirtualAddressForRasterizer(PAddr add
               "Trying to use invalid physical address for rasterizer: {:08X} at PC 0x{:08X}", addr,
               impl->GetPC());
     return {};
+}
+
+// xappify fork — see the header.
+void MemorySystem::SetWriteWatch(VAddr addr, u32 len) {
+    impl->watch_addr = addr;
+    impl->watch_len = len;
+    impl->watch_hits = 0;
+    if (len != 0) {
+        LOG_CRITICAL(HW_Memory, "[mem-watch] armed on [{:#010x}, {:#010x})", addr, addr + len);
+    }
 }
 
 void MemorySystem::RasterizerMarkRegionCached(PAddr start, u32 size, bool cached) {

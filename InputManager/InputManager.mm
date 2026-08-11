@@ -79,8 +79,6 @@ public:
         std::lock_guard<std::mutex> guard(mutex);
         bool button_found = false;
         for (const KeyButtonPair& pair : list) {
-            printf("id = %i, status = %i\n", pair.button_id, pair.key_button->status.load());
-            
             if (pair.button_id == button_id) {
                 pair.key_button->status.store(pressed);
                 button_found = true;

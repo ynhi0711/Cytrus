@@ -142,6 +142,10 @@ void Module::LoadInputDevices() {
 }
 
 void Module::UpdatePadCallback(std::uintptr_t user_data, s64 cycles_late) {
+    // xappify fork: liveness counter, see GetPadUpdateCount(). First statement so every firing
+    // counts, whichever input source (Artic or local devices) the update reads.
+    pad_update_count.fetch_add(1, std::memory_order_relaxed);
+
     SharedMem* mem = reinterpret_cast<SharedMem*>(shared_mem->GetPointer());
 
     if (is_device_reload_pending.exchange(false))

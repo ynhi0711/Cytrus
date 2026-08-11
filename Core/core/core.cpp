@@ -9,7 +9,9 @@
 #include "audio_core/hle/hle.h"
 #include "audio_core/lle/lle.h"
 #include "common/arch.h"
+#include "common/logging/backend.h"
 #include "common/logging/log.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/arm/arm_interface.h"
 #include "core/arm/exclusive_monitor.h"
@@ -172,6 +174,21 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         break;
     }
 
+    // A frontend cancel outranks a pending request: it is only ever sent after the frontend's own
+    // watchdog gave up, and executing the operation anyway (possibly minutes later, mid-session)
+    // is strictly worse than dropping it. `exchange` also clears a stale cancel that arrived when
+    // nothing was pending, so it cannot leak into a future request.
+    if (save_state_cancel_requested.exchange(false, std::memory_order_relaxed) &&
+        save_state_request_status != SaveStateStatus::NONE) {
+        const bool was_loading = save_state_request_status == SaveStateStatus::LOADING;
+        save_state_request_status = SaveStateStatus::NONE;
+        LOG_ERROR(Core, "Cancelled pending {} at the frontend's request",
+                  was_loading ? "Load" : "Save");
+        status_details = "Cancelled by the frontend";
+        NotifySaveStateResult(was_loading, SaveStateOutcome::TransientFailure, status_details);
+        return ResultStatus::ErrorSavestate;
+    }
+
     if (save_state_request_status == SaveStateStatus::LOADING && kernel.get() &&
         !kernel->AreAsyncOperationsPending()) {
         const u32 slot = save_state_slot;
@@ -313,21 +330,79 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
     return status;
 }
 
-/// xappify fork addition — see `System::SaveStateCallback` in core.h. Runs on the emulation thread;
-/// the frontend is responsible for marshalling to its own queue.
+/// xappify fork addition — see `System::SaveStateCallback` in core.h. Usually the emulation thread
+/// (RunLoop resolution) but also the frontend thread (a cancel); the frontend is responsible for
+/// marshalling to its own queue either way.
 void System::NotifySaveStateResult(bool is_load, SaveStateOutcome outcome,
                                    const std::string& details) {
-    // Logged unconditionally, including when no callback is installed: a SAVE outcome is currently
-    // being lost somewhere between here and the frontend while LOAD outcomes arrive fine, and this
-    // is the first of three probes (here → the ObjC trampoline → the Swift adapter) that says which
-    // hop drops it. Remove all three once that is fixed.
-    LOG_INFO(Core, "NotifySaveStateResult is_load={} outcome={} callback_installed={} details='{}'",
-             is_load, static_cast<int>(outcome), static_cast<bool>(save_state_callback), details);
-
-    if (!save_state_callback) {
-        return;
+    SaveStateCallback callback;
+    {
+        std::scoped_lock lock{save_state_callback_mutex};
+        // Logged unconditionally, including when no callback is installed: outcomes were being lost
+        // between here and the frontend, and this is the first of three probes (here → the ObjC
+        // trampoline → the Swift adapter) that says which hop drops one.
+        LOG_INFO(Core,
+                 "NotifySaveStateResult is_load={} outcome={} callback_installed={} details='{}'",
+                 is_load, static_cast<int>(outcome), static_cast<bool>(save_state_callback),
+                 details);
+        if (outcome != SaveStateOutcome::Success) {
+            // Failures are exactly what the frontend's log-tail dumps need to show — flush so the
+            // line is on disk before the app reads the file.
+            Common::Log::FlushBackends();
+        }
+        if (!save_state_callback) {
+            // No handler yet (boot-queued request resolving before the frontend wired up) — latch
+            // instead of dropping; `SetSaveStateCallback` delivers it. Newest outcome wins.
+            undelivered_save_state_outcome = std::make_tuple(is_load, outcome, details);
+            return;
+        }
+        callback = save_state_callback;
     }
-    save_state_callback(is_load, outcome, details);
+    // Outside the lock: the callback may be arbitrarily slow, and must be free to call back into
+    // `SetSaveStateCallback` without deadlocking.
+    callback(is_load, outcome, details);
+}
+
+void System::SetSaveStateCallback(SaveStateCallback callback) {
+    SaveStateCallback installed;
+    std::optional<std::tuple<bool, SaveStateOutcome, std::string>> latched;
+    {
+        std::scoped_lock lock{save_state_callback_mutex};
+        save_state_callback = std::move(callback);
+        if (save_state_callback) {
+            latched.swap(undelivered_save_state_outcome);
+            installed = save_state_callback;
+        } else {
+            // Uninstalling drops any latch — a stale outcome must not greet the NEXT session's
+            // handler as if it were fresh.
+            undelivered_save_state_outcome.reset();
+        }
+    }
+    if (latched) {
+        const auto& [is_load, outcome, details] = *latched;
+        LOG_INFO(Core, "Delivering latched save-state outcome is_load={} outcome={}", is_load,
+                 static_cast<int>(outcome));
+        installed(is_load, outcome, details);
+    }
+}
+
+void System::CancelPendingSaveStateOperation() {
+    {
+        std::scoped_lock lock{signal_mutex};
+        if (current_signal == Signal::Load || current_signal == Signal::Save) {
+            const bool was_load = current_signal == Signal::Load;
+            current_signal = Signal::None;
+            LOG_ERROR(Core, "Cancelled queued {} at the frontend's request",
+                      was_load ? "Load" : "Save");
+            NotifySaveStateResult(was_load, SaveStateOutcome::TransientFailure,
+                                  "Cancelled by the frontend");
+            return;
+        }
+    }
+    // The signal may already have been consumed into `save_state_request_status`, which belongs to
+    // the emulation thread — ask RunLoop to resolve it instead of racing it. If nothing is pending
+    // when RunLoop looks, the flag is simply cleared.
+    save_state_cancel_requested.store(true, std::memory_order_relaxed);
 }
 
 /// Human-readable signal name for the failure details the frontend surfaces. `Signal` has no
@@ -965,6 +1040,18 @@ void System::serialize(Archive& ar, const unsigned int file_version) {
     const bool should_flush = !Archive::is_loading::value;
     gpu->ClearAll(should_flush);
     ar&* timing.get();
+    // xappify fork: `Timing::serialize` latches `event_queue_locked` on load, and until now the
+    // ONLY unlock was the explicit call far below, after every other subsystem deserialized. A
+    // throw anywhere in between (truncated payload, bad_alloc under memory pressure) stranded the
+    // lock for the rest of the process: ScheduleEvent becomes a silent no-op, the HID pad-update
+    // event never re-arms, and input dies while the already-running render threads keep presenting
+    // — the "buttons dead, video alive" wedge. Guarantee the unlock on every exit; it is
+    // idempotent, so running after the explicit call on the success path is harmless.
+    SCOPE_EXIT({
+        if (Archive::is_loading::value) {
+            timing->UnlockEventQueue();
+        }
+    });
     for (u32 i = 0; i < num_cores; i++) {
         ar&* cpu_cores[i].get();
     }

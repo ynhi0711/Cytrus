@@ -158,7 +158,16 @@ NS_ASSUME_NONNULL_BEGIN
 //
 // It is also how a SAVE is known to be finished: the compressed payload is written incrementally,
 // so the file's existence/size says nothing about completeness until the core publishes it.
+// Main-thread only: the emulation thread never reads this property — the install-time capture
+// inside `setSaveStateHandler:` is what resolution uses, so cross-thread reads cannot tear.
 @property (nonatomic, copy, nullable) void (^saveStateHandler) (BOOL isLoad, CytrusSaveStateOutcome outcome, NSString *details);
+
+/// xappify fork addition. Call when the app's own watchdog gives up waiting on a queued
+/// `load:`/`save:`: a still-pending request is dropped (resolving as a transient failure through
+/// `saveStateHandler`) so it can never execute arbitrarily late — a load landing minutes after the
+/// player moved on warps the session, and one that fails mid-deserialize corrupts it. A request
+/// already executing inside the core cannot be cancelled; the call is then a no-op. Thread-safe.
+-(void) cancelPendingSaveStateOperation;
 
 /// Title ID of the running application — the value save states are keyed and validated against.
 /// 0 when nothing is booted. Lets the app pre-check a .cst before requesting a load.
@@ -201,6 +210,13 @@ NS_ASSUME_NONNULL_BEGIN
 -(uint64_t) systemFrames;
 /// GSP frame submissions by the guest — freezes the moment the title stops drawing.
 -(uint64_t) gameFrames;
+/// HID pad-update event firings — the input pump. The pump is a self-rescheduling core-timing
+/// event, so it climbs at a fixed rate whenever the core runs, independent of whether the player
+/// touches anything:
+///   runLoopReturns climbing, padUpdates FROZEN → the input pump is dead (event re-schedule was
+///   dropped); buttons/touch go unhandled while everything already running continues.
+/// Restarts at 0 when a save-state load rebuilds the HID module — treat a DECREASE as a reanchor.
+-(uint64_t) padUpdates;
 
 /// Ask the core to log every guest thread's status and what it is blocked on (see
 /// `Kernel::KernelSystem::LogGuestThreadState`). Use when `gameFrames` has gone flat while

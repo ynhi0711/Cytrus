@@ -370,6 +370,13 @@ bool PipelineCache::BindPipeline(PipelineInfo& info, bool wait_built) {
         info.state.shader_ids[i] = shader_hashes[i];
     }
 
+    // xappify fork: null in the window after a failed save-state load left the renderer rebuilt
+    // but SwitchDiskResources never ran (see the note above LoadDiskResources). Was a guaranteed
+    // EXC_BAD_ACCESS on the next draw; skipping the draw keeps the session alive for recovery.
+    if (!curr_disk_cache) {
+        return false;
+    }
+
     GraphicsPipeline* const pipeline = curr_disk_cache->GetPipeline(info);
     if (!pipeline->IsDone() && !pipeline->TryBuild(wait_built)) {
         return false;
@@ -535,6 +542,11 @@ bool PipelineCache::UseProgrammableVertexShader(const Pica::RegsInternal& regs,
                                                 Pica::ShaderSetup& setup,
                                                 const VertexLayout& layout) {
 
+    // xappify fork: see BindPipeline — null after a failed save-state load; deref crashed here.
+    if (!curr_disk_cache) {
+        return false;
+    }
+
     auto res = curr_disk_cache->UseProgrammableVertexShader(regs, setup, layout);
 
     if (res.has_value()) {
@@ -552,6 +564,11 @@ void PipelineCache::UseTrivialVertexShader() {
 }
 
 bool PipelineCache::UseFixedGeometryShader(const Pica::RegsInternal& regs) {
+
+    // xappify fork: see BindPipeline — null after a failed save-state load.
+    if (!curr_disk_cache) {
+        return false;
+    }
 
     auto res = curr_disk_cache->UseFixedGeometryShader(regs);
 
@@ -571,6 +588,11 @@ void PipelineCache::UseTrivialGeometryShader() {
 
 void PipelineCache::UseFragmentShader(const Pica::RegsInternal& regs,
                                       const Pica::Shader::UserConfig& user) {
+
+    // xappify fork: see BindPipeline — null after a failed save-state load.
+    if (!curr_disk_cache) {
+        return;
+    }
 
     auto res = curr_disk_cache->UseFragmentShader(regs, user);
 

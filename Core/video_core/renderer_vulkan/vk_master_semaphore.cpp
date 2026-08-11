@@ -3,6 +3,7 @@
 
 #include <limits>
 #include <mutex>
+#include "common/logging/log.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 
@@ -54,8 +55,17 @@ void MasterSemaphoreTimeline::Wait(u64 tick) {
         .pValues = &tick,
     };
 
-    while (instance.GetDevice().waitSemaphoresKHR(&wait_info, WAIT_TIMEOUT) !=
-           vk::Result::eSuccess) {
+    // xappify fork: BOUNDED per attempt. This is reached from the EMULATION thread via
+    // `Scheduler::Wait`/`Finish`, and it used to pass an infinite timeout — the last unbounded GPU
+    // wait on that thread, i.e. the one place a wedged graphics queue could hang the emulator with
+    // no log line at all. Still waits as long as it takes (there is no safe way to fabricate GPU
+    // completion); it just names itself every second, and prints how far the GPU actually got.
+    static constexpr u64 bounded_wait_ns = 1'000'000'000;
+    for (u32 waited = 0; instance.GetDevice().waitSemaphoresKHR(&wait_info, bounded_wait_ns) !=
+                         vk::Result::eSuccess;
+         ++waited) {
+        LOG_CRITICAL(Render_Vulkan, "Timeline semaphore wait for tick {} blocked for {}s (GPU at {})",
+                     tick, waited + 1, instance.GetDevice().getSemaphoreCounterValueKHR(*semaphore));
     }
     Refresh();
 }

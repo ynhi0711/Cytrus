@@ -307,7 +307,8 @@ public:
      * scheduler; walking it from the UI thread is a data race. See `-[CytrusEmulator
      * requestGuestStateDump]`, which defers to the `insert:` run loop for exactly this reason.
      */
-    void LogGuestThreadState(const char* marker) const;
+    /// Not `const`: the running thread's dump reads guest memory for its instruction words.
+    void LogGuestThreadState(const char* marker);
 
     /**
      * xappify fork: records the currently-scheduled guest thread's PC into a ring buffer.

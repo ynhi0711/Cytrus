@@ -201,8 +201,25 @@ static std::string SummarisePcSamples(const std::vector<std::pair<u32, u32>>& sa
     return fmt::format("samples={} distinctPCs={} hottest=[{}]", total, ranked.size(), hottest);
 }
 
+/// Distinct PCs from a thread's sample bucket, hottest first — the addresses worth disassembling.
+static std::vector<u32> HotPcs(const std::vector<std::pair<u32, u32>>& samples, std::size_t limit) {
+    std::map<u32, u32> counts;
+    for (const auto& [pc, hits] : samples) {
+        counts[pc] += hits;
+    }
+    std::vector<std::pair<u32, u32>> ranked{counts.begin(), counts.end()};
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    std::vector<u32> pcs;
+    for (std::size_t i = 0; i < ranked.size() && i < limit; ++i) {
+        pcs.push_back(ranked[i].first);
+    }
+    return pcs;
+}
+
 // xappify fork — see the header for why this exists and why it is emulation-thread only.
-void KernelSystem::LogGuestThreadState(const char* marker) const {
+void KernelSystem::LogGuestThreadState(const char* marker) {
     LOG_CRITICAL(Kernel, "[guest-state] {} BEGIN cores={} pcSamplesTaken={}", marker,
                  thread_managers.size(), pc_samples_taken);
 
@@ -261,6 +278,58 @@ void KernelSystem::LogGuestThreadState(const char* marker) const {
                          thread->context.GetProgramCounter(), thread.get() == current ? 1 : 0,
                          thread->held_mutexes.size(), thread->pending_mutexes.size(), waiting_on,
                          pc_summary);
+
+            // For the RUNNING thread only, dump enough to identify what it is polling.
+            //
+            // A wedged title shows up here as a handful of PCs looping forever with no SVC — but the
+            // histogram cannot say WHICH memory location the loop is waiting on, and that is the
+            // whole question. Registers plus the raw instruction words answer it: decode the `ldr`
+            // at the loop head, take its base register from the dump, and the address falls out.
+            // Two dumps ten seconds apart then say whether the value ever moves.
+            //
+            // Deliberately NOT disassembled here — four raw words are trivial to decode by hand, and
+            // a decoder is code that can be wrong in a way the raw words cannot be.
+            if (thread.get() != current || samples == samples_by_thread.end()) {
+                continue;
+            }
+
+            // r13/r14/r15 are sp/lr/pc and are printed by name below, so stop at r12.
+            std::string registers;
+            for (std::size_t i = 0; i < 13; ++i) {
+                registers += fmt::format("r{}={:08x} ", i, thread->context.cpu_registers[i]);
+            }
+            LOG_CRITICAL(Kernel, "[guest-state] {} tid={} SPIN {}sp={:08x} lr={:08x} pc={:08x} cpsr={:08x}",
+                         marker, thread->thread_id, registers, thread->context.GetStackPointer(),
+                         thread->context.GetLinkRegister(), thread->context.GetProgramCounter(),
+                         thread->context.cpsr);
+
+            for (const u32 pc : HotPcs(samples->second, 8)) {
+                // Guest memory, read through the same MemorySystem the arbiter reads values from.
+                // An unmapped PC cannot happen for an address we just sampled executing.
+                LOG_CRITICAL(Kernel, "[guest-state] {} tid={} code {:#010x}: {:08x}", marker,
+                             thread->thread_id, pc, memory.Read32(pc));
+            }
+
+            // The words around whatever the loop is dereferencing. The device capture that motivated
+            // this showed a list node whose `next` pointed at itself; seeing the neighbouring fields
+            // says whether that is one bad pointer in an otherwise live structure (someone wrote a
+            // single field) or wholesale garbage (a stale or freed allocation). Those need different
+            // culprits, and it is four lines to tell them apart.
+            //
+            // Anchored on r0/r1 because the ARM `ldr rX, [rY, #imm]` idiom that dominates these loops
+            // keeps the object pointer in a low register; both are printed since which one holds it
+            // depends on where in the loop the dump landed.
+            for (const u32 base : {thread->context.cpu_registers[0], thread->context.cpu_registers[1]}) {
+                if (base < 0x1000) {
+                    continue; // Not a pointer.
+                }
+                std::string words;
+                for (u32 offset = 0; offset < 0x40; offset += 4) {
+                    words += fmt::format("{:08x} ", memory.Read32(base - 0x20 + offset));
+                }
+                LOG_CRITICAL(Kernel, "[guest-state] {} tid={} mem {:#010x}-0x20: {}", marker,
+                             thread->thread_id, base, words);
+            }
         }
     }
 

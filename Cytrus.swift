@@ -352,6 +352,10 @@ extension Cytrus {
     @discardableResult public func load(_ slot: Int) -> Bool { emulator.load(slot) }
     @discardableResult public func save(_ slot: Int) -> Bool { emulator.save(slot) }
 
+    /// Drop a still-queued load/save so it can never execute arbitrarily late (it resolves as a
+    /// transient failure through the handler). A request already executing is unaffected.
+    public func cancelPendingSaveStateOperation() { emulator.cancelPendingSaveStateOperation() }
+
     /// Install a handler that fires on the main queue once a queued load/save actually RESOLVES.
     /// `details` is empty on success and carries the core's rejection reason otherwise (stale build
     /// revision, wrong title, pending async operations, deserialize failure). The outcome separates
@@ -371,6 +375,10 @@ extension Cytrus {
     /// app can reject an incompatible state before requesting a load that would silently fail.
     public var runningTitleID: UInt64 { emulator.runningTitleID() }
     public var saveStateRevision: String { emulator.saveStateRevision() }
+
+    /// Input-pump liveness — see `CytrusEmulator.padUpdates`. Frozen while `runLoopReturns` climbs
+    /// means input is dead; restarts at 0 after a save-state load (treat decreases as reanchors).
+    public var padUpdates: UInt64 { emulator.padUpdates() }
     
     public func insertAmiibo(_ url: URL) -> Bool { emulator.insertAmiibo(url) }
     public func removeAmiibo() { emulator.removeAbiibo() }

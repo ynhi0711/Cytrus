@@ -1477,4 +1477,13 @@ u64 RendererVulkan::GetSwapchainRecreations() const {
     return total;
 }
 
+// xappify fork — see RendererBase. One line per window so a stuck secondary window cannot hide
+// behind a healthy main one.
+void RendererVulkan::LogPresentationState(const char* marker) {
+    main_present_window.LogPresentState(marker);
+    if (secondary_present_window_ptr) {
+        secondary_present_window_ptr->LogPresentState(marker);
+    }
+}
+
 } // namespace Vulkan

@@ -608,6 +608,20 @@ public:
      */
     void RasterizerMarkRegionCached(PAddr start, u32 size, bool cached);
 
+    /**
+     * xappify fork: log every GUEST write into [addr, addr + len), with the value and the PC that
+     * wrote it. Pass `len == 0` to disarm (the default).
+     *
+     * For chasing guest-heap corruption: the 3DS wedge dump names a heap address whose contents are
+     * wrong (a list node's `next` overwritten with its own address), but the write happened long
+     * before the freeze was detectable. Arm the address on the next run and the writer names itself.
+     *
+     * Only sees stores that go through `MemorySystem::Write<T>`. HLE code writing through a raw
+     * `GetPointer` (GSP, DSP, rasterizer flushes) does NOT trip it — so a silent watch over a value
+     * that still changed is itself a result, not a failure. Output is rate-limited to 64 hits.
+     */
+    void SetWriteWatch(VAddr addr, u32 len);
+
     /// For a rasterizer-accessible PAddr, gets a list of all possible VAddr
     std::vector<VAddr> PhysicalToVirtualAddressForRasterizer(PAddr addr);
 

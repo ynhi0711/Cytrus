@@ -153,6 +153,13 @@ PresentWindow::PresentWindow(Frontend::EmuWindow& emu_window_, const Instance& i
 
 PresentWindow::~PresentWindow() {
     scheduler.Finish();
+    // xappify fork: a `RetirePresentedFrame` empty submit can still be in flight on the graphics
+    // queue at teardown; destroying its fence/semaphore under it is a validation error at best.
+    // Shutdown-only cost.
+    {
+        const std::scoped_lock submit_lock{scheduler.submit_mutex};
+        graphics_queue.waitIdle();
+    }
     const vk::Device device = instance.GetDevice();
     device.destroyCommandPool(command_pool);
     device.destroyRenderPass(present_renderpass);
@@ -260,26 +267,43 @@ Frame* PresentWindow::GetRenderFrame() {
          ++waited) {
         LOG_CRITICAL(Render_Vulkan,
                      "No free presentation frame after {}s — the present thread is not recycling "
-                     "frames (suspended={})",
-                     waited + 1, presentation_suspended.load(std::memory_order_relaxed));
+                     "frames (lifecycle_suspended={} starvation_suspended={})",
+                     waited + 1, presentation_suspended.load(std::memory_order_relaxed),
+                     starvation_suspended.load(std::memory_order_relaxed));
 
         // Self-defence, not a fallback frame: handing back a Frame that is still in the present
-        // queue would let the emulation thread render into an image the GPU is reading. Suspending
+        // queue would let the emulation thread render into an image the GPU is reading. Latching
         // instead makes `CopyToSwapchain` return immediately, so every in-flight frame is recycled
-        // by its caller within one pass and this wait is then satisfied legitimately. The app
-        // clears it again via ResumePresentation when it comes back to the foreground.
+        // by its caller within one pass and this wait is then satisfied legitimately.
+        //
+        // Its OWN flag, not the lifecycle one: when this used to set `presentation_suspended`, a
+        // 5-second hitch while FOREGROUNDED (shader-compile stall, thermal throttle) killed video
+        // for the rest of the session — nothing app-side knew to call ResumePresentation. The latch
+        // below is cleared by this same function the moment the starvation ends.
         if (waited + 1 == max_reports) {
             LOG_CRITICAL(Render_Vulkan,
-                         "Presentation starved for {}s — suspending presentation to unblock the "
-                         "emulation thread",
+                         "Presentation starved for {}s — engaging starvation latch to unblock the "
+                         "emulation thread (lifecycle suspend untouched)",
                          max_reports);
-            presentation_suspended.store(true, std::memory_order_relaxed);
+            starvation_suspended.store(true, std::memory_order_relaxed);
+            last_suspend_source.store(2, std::memory_order_relaxed);
         }
     }
 
     // Take the frame from the queue
     Frame* frame = free_queue.front();
     free_queue.pop();
+
+    // The latch's one job — drain in-flight frames back to `free_queue` — is done the moment this
+    // wait is satisfied. If presentation is still genuinely broken the next pass re-latches after
+    // 5 s: a bounded duty cycle with a named log line each way, instead of a dead-for-the-session
+    // screen. (Only this thread sets and clears the latch; ResumePresentation's clear is a wipe on
+    // foreground return, not a race.)
+    if (starvation_suspended.load(std::memory_order_relaxed)) {
+        starvation_suspended.store(false, std::memory_order_relaxed);
+        LOG_CRITICAL(Render_Vulkan,
+                     "Starvation latch cleared — presentation resumes on the next present");
+    }
 
     vk::Device device = instance.GetDevice();
     vk::Result result{};
@@ -339,9 +363,20 @@ void PresentWindow::WaitPresent() {
     }
 
     // Wait for the present queue to be empty
+    //
+    // xappify fork: BOUNDED per attempt. This is called from the emulation thread (the resize path
+    // in `RenderToWindow`), and it used to be an untimed wait — the last silent way for a stuck
+    // present thread to hang the emulator. Still waits as long as it takes; it just says so.
     {
+        using namespace std::chrono_literals;
         std::unique_lock queue_lock{queue_mutex};
-        frame_cv.wait(queue_lock, [this] { return present_queue.empty(); });
+        for (u32 waited = 0;
+             !frame_cv.wait_for(queue_lock, 1s, [this] { return present_queue.empty(); });
+             ++waited) {
+            LOG_CRITICAL(Render_Vulkan,
+                         "WaitPresent blocked for {}s — present queue still holds {} frame(s)",
+                         waited + 1, present_queue.size());
+        }
     }
 
     // The above condition will be satisfied when the last frame is taken from the queue.
@@ -399,12 +434,17 @@ void PresentWindow::NotifySurfaceChanged() {
 
 void PresentWindow::SuspendPresentation() {
     presentation_suspended.store(true, std::memory_order_relaxed);
+    last_suspend_source.store(1, std::memory_order_relaxed);
     // Anything already parked in GetRenderFrame should re-evaluate now rather than burn its timeout.
     free_cv.notify_all();
 }
 
 void PresentWindow::ResumePresentation() {
     presentation_suspended.store(false, std::memory_order_relaxed);
+    // Clean slate: a starvation latch from before the background trip is stale by definition — the
+    // in-flight frames it existed to drain were recycled while suspended.
+    starvation_suspended.store(false, std::memory_order_relaxed);
+    last_suspend_source.store(0, std::memory_order_relaxed);
     // The surface may have been torn down and rebuilt underneath us while suspended (an iOS app
     // returning to the foreground gets a fresh drawable pool), so force a swapchain rebuild on the
     // next present rather than trusting the one we had.
@@ -424,15 +464,63 @@ void PresentWindow::RetirePresentedFrame(Frame* frame) {
     // prevent. Signal it with an empty submit so the frame is genuinely reusable.
     // Same lock order as the normal path and as `recreate_swapchain` (swapchain_mutex, held by our
     // caller, then submit_mutex).
+    //
+    // INVARIANT: only call this on a frame that reached `CopyToSwapchain` through `Present()`. Such
+    // a frame carries a pending `render_ready` signal — `RenderToWindow` does
+    // `scheduler.Flush(frame->render_ready)` before every `Present()`, and the only thing that
+    // consumes the signal is the present submit this function is standing in for. The empty submit
+    // below therefore WAITS `render_ready` (consuming the signal) as well as signalling the fence.
+    // Both halves matter:
+    //   - skip the fence and the next `GetRenderFrame` on this frame blocks forever (see above);
+    //   - skip the semaphore and the frame's NEXT pass re-signals an already-signalled binary
+    //     semaphore — a VUID-vkQueueSubmit-pSignalSemaphores-00067 violation that MoltenVK's
+    //     MTLEvent emulation turns into cumulative queue-wait skew. Device symptom: the game slows
+    //     down over successive background trips, then wedges in a GPU wait that never returns.
+    // A caller that violates the invariant (retiring a frame with NO pending signal) deadlocks the
+    // graphics queue on this wait — the bounded fence wait in `GetRenderFrame` names that within 1 s.
     const std::scoped_lock submit_lock{scheduler.submit_mutex};
     try {
-        // No batches — `vkQueueSubmit(queue, 0, nullptr, fence)`. Signals the fence once work already
-        // on the queue completes, which is exactly the guarantee `GetRenderFrame` waits for.
-        graphics_queue.submit(nullptr, frame->present_done);
+        // No command buffers — `vkQueueSubmit` purely for its synchronisation effects.
+        static constexpr vk::PipelineStageFlags retire_wait_stage =
+            vk::PipelineStageFlagBits::eAllCommands;
+        const vk::SubmitInfo retire_info = {
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &frame->render_ready,
+            .pWaitDstStageMask = &retire_wait_stage,
+        };
+        graphics_queue.submit(retire_info, frame->present_done);
+        retired_frames.fetch_add(1, std::memory_order_relaxed);
     } catch (const vk::SystemError& err) {
-        // Nothing left to try — but say so, because the symptom downstream would be a silent hang.
+        // Nothing left to try — but say so, because the symptom downstream would be a silent hang
+        // (unsignalled fence) plus a leaked render_ready signal on this frame's next pass.
         LOG_CRITICAL(Render_Vulkan, "Failed to retire an unpresented frame's fence: {}", err.what());
     }
+}
+
+// xappify fork — see the header. Emulation-thread safe by lock discipline: the two queue mutexes
+// are taken one after the other, and the swapchain/submit mutexes are never touched.
+void PresentWindow::LogPresentState(const char* marker) {
+    std::size_t free_count = 0;
+    {
+        std::scoped_lock lock{free_mutex};
+        free_count = free_queue.size();
+    }
+    std::size_t queued_count = 0;
+    {
+        std::scoped_lock lock{queue_mutex};
+        queued_count = present_queue.size();
+    }
+    const u8 source = last_suspend_source.load(std::memory_order_relaxed);
+    LOG_CRITICAL(Render_Vulkan,
+                 "[present-state] marker={} free={} queued={} lifecycle_suspended={} "
+                 "starvation_suspended={} last_suspend_source={} retired={} recreations={}",
+                 marker, free_count, queued_count,
+                 presentation_suspended.load(std::memory_order_relaxed),
+                 starvation_suspended.load(std::memory_order_relaxed),
+                 source == 1 ? "lifecycle"
+                 : source == 2 ? "starvation"
+                               : "none",
+                 retired_frames.load(std::memory_order_relaxed), swapchain.GetRecreations());
 }
 
 void PresentWindow::CopyToSwapchain(Frame* frame) {
@@ -440,7 +528,8 @@ void PresentWindow::CopyToSwapchain(Frame* frame) {
     // that is needed — BOTH callers (`PresentThread` and the `!use_present_thread` branch of
     // `Present`) push the frame back onto `free_queue` themselves, so recycling it here as well
     // would enqueue the same frame twice. See SuspendPresentation.
-    if (presentation_suspended.load(std::memory_order_relaxed)) [[unlikely]] {
+    if (presentation_suspended.load(std::memory_order_relaxed) ||
+        starvation_suspended.load(std::memory_order_relaxed)) [[unlikely]] {
         RetirePresentedFrame(frame);
         return;
     }

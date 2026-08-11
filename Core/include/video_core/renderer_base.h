@@ -87,6 +87,15 @@ public:
         return 0;
     }
 
+    /**
+     * xappify fork: emit one `[present-state]` log line per presentation surface — queue depths,
+     * suspend flags, retired-frame count. Called from the emulation-thread wedge dump so a capture
+     * can tell a present-path wedge (frames stuck, a suspend flag latched) from a guest wedge
+     * (presentation idle because the title stopped drawing). Backends with no present queue keep
+     * the no-op default.
+     */
+    virtual void LogPresentationState(const char* marker) {}
+
     /// Returns the resolution scale factor relative to the native 3DS screen resolution
     u32 GetResolutionScaleFactor();
 

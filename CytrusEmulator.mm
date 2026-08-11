@@ -19,6 +19,7 @@
 #include "common/scm_rev.h"
 // xappify fork: the wedge dump reaches into GSP for the interrupt/framebuffer state.
 #include "core/hle/service/gsp/gsp_gpu.h"
+#include "core/hle/service/hid/hid.h"
 #include "core/hle/service/sm/sm.h"
 
 #define SDL_MAIN_HANDLED
@@ -45,14 +46,32 @@ static void TryShutdown() {
 @implementation CytrusEmulator
 -(CytrusEmulator *) init {
     if (self = [super init]) {
+        // xappify fork: start each launch with an EMPTY log.
+        //
+        // The core appends to `Documents/Cytrus/log/cytrus_log.txt` forever, and its timestamps are
+        // per-process — so a log tail can splice a previous launch's lines onto this one with no
+        // visible seam. That happened on a device capture and sent a whole debugging round chasing
+        // filesystem errors that belonged to an earlier install. Truncate before the backends open
+        // it, and stamp the container path so any future splice is obvious on sight.
+        {
+            const std::string log_path =
+                FileUtil::GetUserPath(FileUtil::UserPath::LogDir) + "cytrus_log.txt";
+            FileUtil::Delete(log_path);
+        }
+
         Common::Log::Initialize();
         Common::Log::SetColorConsoleBackendEnabled(false);
         Common::Log::Start();
-        
+
         Common::Log::Filter filter;
         filter.ParseFilterString(Settings::values.log_filter.GetValue());
         Common::Log::SetGlobalFilter(filter);
-        
+
+        // First line of every log: which app container these paths live in. Two different containers
+        // in one file means the log was spliced and half of it belongs to another process.
+        LOG_CRITICAL(Common, "[session] user dir: {}",
+                     FileUtil::GetUserPath(FileUtil::UserPath::UserDir));
+
         pause_emulation.store(false);
         stop_run.store(false);
 
@@ -247,6 +266,10 @@ static void TryShutdown() {
             if (auto gsp = system.ServiceManager().GetService<Service::GSP::GSP_GPU>("gsp::Gpu")) {
                 gsp->LogState("wedge");
             }
+            // The presentation side of the same question: a wedge with frames stuck in the present
+            // queue (or a suspend flag latched) is a present-path fault, not a guest one — and the
+            // guest/GSP blocks above cannot see that at all. Rides in BOTH dumps so it diffs.
+            system.GPU().Renderer().LogPresentationState("wedge");
             // The logging backends are asynchronous — entries go through a queue that a separate
             // thread drains. Flush so the lines are on disk by the time the frontend reads the log
             // tail, instead of it guessing how long to wait.
@@ -439,6 +462,16 @@ static void TryShutdown() {
 
 -(uint64_t) gameFrames {
     return Core::System::GetInstance().GetTotalGameFrames();
+}
+
+// xappify fork addition — input-pump liveness, see the header. Cross-thread service-map lookup
+// follows the `insertAmiibo` precedent; the IsPoweredOn guard covers the no-system window.
+-(uint64_t) padUpdates {
+    if (stop_run.load() || !Core::System::GetInstance().IsPoweredOn()) {
+        return 0;
+    }
+    auto hid = Service::HID::GetModule(Core::System::GetInstance());
+    return hid ? hid->GetPadUpdateCount() : 0;
 }
 
 -(void) requestGuestStateDump {
@@ -664,6 +697,18 @@ static void TryShutdown() {
     Settings::values.volume.SetValue(_float(@"cytrus.v1.38.volume"));
     Settings::values.output_type.SetValue(static_cast<AudioCore::SinkType>(unsigned32(@"cytrus.v1.38.outputType")));
     Settings::values.input_type.SetValue(static_cast<AudioCore::InputType>(unsigned32(@"cytrus.v1.38.inputType")));
+
+    // xappify fork: guest write-watch, for chasing the heap corruption behind the 3DS wedge. Set
+    // `cytrus.v1.38.memWatchAddress` to the address the wedge dump named and reproduce; zero (the
+    // default) disarms it, so this is inert for every normal run. Applied only once a system exists
+    // — `updateSettings` also runs before boot, where there is no memory to watch.
+    if (Core::System::GetInstance().IsPoweredOn()) {
+        const u32 watch_address = unsigned32(@"cytrus.v1.38.memWatchAddress");
+        const u32 configured_len = unsigned32(@"cytrus.v1.38.memWatchLength");
+        Core::System::GetInstance().Memory().SetWriteWatch(
+            watch_address, watch_address == 0 ? 0 : (configured_len == 0 ? 4 : configured_len));
+    }
+
     // Miscellaneous
     std::string log_filter{"*:Info"};
     switch ([defaults integerForKey:@"cytrus.v1.38.logLevel"]) {
@@ -767,7 +812,12 @@ static void TryShutdown() {
         return;
     }
 
-    Core::System::GetInstance().SetSaveStateCallback([](bool isLoad, Core::System::SaveStateOutcome outcome, const std::string& details) {
+    // Captured at install time as the delivery fallback: the main-queue hop below re-reads the
+    // property so a replaced handler is honoured, but a handler cleared between resolution and the
+    // drain used to silently swallow the outcome. The capture closes that hole.
+    void (^installedHandler)(BOOL, CytrusSaveStateOutcome, NSString *) = _saveStateHandler;
+
+    Core::System::GetInstance().SetSaveStateCallback([installedHandler](bool isLoad, Core::System::SaveStateOutcome outcome, const std::string& details) {
         CytrusSaveStateOutcome mapped;
         switch (outcome) {
             case Core::System::SaveStateOutcome::Success:
@@ -793,12 +843,23 @@ static void TryShutdown() {
 
         dispatch_async(dispatch_get_main_queue(), ^{
             CytrusEmulator *emulator = [CytrusEmulator sharedInstance];
+            // Current handler wins (a replaced handler is honoured); the install-time capture is
+            // the fallback so a cleared property can no longer drop an in-flight outcome.
+            void (^handler)(BOOL, CytrusSaveStateOutcome, NSString *) =
+                emulator.saveStateHandler ?: installedHandler;
             printf("[Cytrus] saveStateCallback DELIVER isLoad=%d handler=%s\n",
-                   (int)isLoad, emulator.saveStateHandler ? "set" : "nil");
-            if (emulator.saveStateHandler)
-                emulator.saveStateHandler(isLoad, mapped, message);
+                   (int)isLoad, emulator.saveStateHandler ? "set" : "fallback");
+            if (handler)
+                handler(isLoad, mapped, message);
         });
     });
+}
+
+// xappify fork addition — see the header. Delegates to Core::System, which resolves a queued
+// request as TransientFailure("Cancelled by the frontend") or asks RunLoop to do so if the signal
+// was already consumed. Safe to call regardless of core state.
+-(void) cancelPendingSaveStateOperation {
+    Core::System::GetInstance().CancelPendingSaveStateOperation();
 }
 
 -(uint64_t) runningTitleID {

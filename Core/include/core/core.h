@@ -9,7 +9,9 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <tuple>
 #include <boost/optional.hpp>
 #include <boost/serialization/version.hpp>
 #include "common/common_types.h"
@@ -403,12 +405,23 @@ public:
 
     using SaveStateCallback = std::function<void(bool, SaveStateOutcome, const std::string&)>;
 
-    void SetSaveStateCallback(SaveStateCallback callback) {
-        save_state_callback = std::move(callback);
-    }
+    /// Thread-safe. If an outcome was produced before any callback was installed (a boot-queued
+    /// load can resolve while the frontend is still wiring up), it is delivered to the new callback
+    /// immediately, on the installer's thread.
+    void SetSaveStateCallback(SaveStateCallback callback);
 
-    /// Invokes `save_state_callback` if one is installed. Emulation thread only.
+    /// Invokes `save_state_callback` if one is installed; otherwise latches the outcome for the
+    /// next `SetSaveStateCallback`. Thread-safe (normally the emulation thread; also the frontend
+    /// thread via `CancelPendingSaveStateOperation`).
     void NotifySaveStateResult(bool is_load, SaveStateOutcome outcome, const std::string& details);
+
+    /// xappify fork addition. The frontend gave up waiting on a queued Save/Load: prevent a
+    /// still-pending request from executing arbitrarily late — a load landing minutes after the
+    /// player moved on warps the session, and one that throws mid-deserialize leaves the system
+    /// half-restored. Thread-safe. A request already executing inside LoadState/SaveState cannot
+    /// be cancelled; the cancel then resolves as a no-op. Every cancelled request still reports
+    /// TransientFailure through the outcome callback.
+    void CancelPendingSaveStateOperation();
 
     /// The title ID of the running application — the value save states are keyed and validated
     /// against (see `savestate.cpp`). 0 when nothing is loaded.
@@ -519,8 +532,17 @@ private:
     SaveStateStatus save_state_request_status = SaveStateStatus::NONE;
     u32 save_state_slot = 0;
     std::chrono::steady_clock::time_point save_state_request_time{};
-    /// Set once by the frontend before boot; only ever read/invoked on the emulation thread.
+    /// Guarded by `save_state_callback_mutex`: installed from the frontend thread while the
+    /// emulation thread invokes it — an unsynchronized `std::function` assign/read is a torn-copy
+    /// UB race that silently drops outcomes. Copy under the lock, invoke outside it.
     SaveStateCallback save_state_callback;
+    std::mutex save_state_callback_mutex;
+    /// Outcome produced while no callback was installed — delivered on the next install instead of
+    /// vanishing. Guarded by `save_state_callback_mutex`.
+    std::optional<std::tuple<bool, SaveStateOutcome, std::string>> undelivered_save_state_outcome;
+    /// Set by `CancelPendingSaveStateOperation` (frontend thread), consumed by `RunLoop` before the
+    /// pending request would execute.
+    std::atomic_bool save_state_cancel_requested{false};
     /// Human-readable phase breakdown of the last save/load, reported to the frontend as the success
     /// `details`. A load is dominated by the Vulkan teardown/rebuild inside `serialize`, not by the
     /// archive, so the split is what makes it diagnosable. `mutable` because `SaveState` is const.

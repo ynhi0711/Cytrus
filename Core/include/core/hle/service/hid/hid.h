@@ -338,6 +338,16 @@ public:
 
     const PadState& GetState() const;
 
+    /// xappify fork addition — input-pump liveness. `UpdatePadCallback` is a self-rescheduling
+    /// core-timing event; if its re-schedule is ever dropped (e.g. a stranded event-queue lock),
+    /// input dies silently while the rest of the emulator keeps running. This counter freezing
+    /// while `runLoopReturns` climbs names that wedge from a log line. Deliberately NOT
+    /// serialized: monotonic within one Module lifetime, restarts at 0 when a save-state load
+    /// rebuilds the module — samplers must treat a decrease as a reanchor, not a freeze.
+    u64 GetPadUpdateCount() const {
+        return pad_update_count.load(std::memory_order_relaxed);
+    }
+
     // Updating period for each HID device. These empirical values are measured from a 11.2 3DS.
     static constexpr u64 pad_update_ticks = BASE_CLOCK_RATE_ARM11 / 234;
     static constexpr u64 accelerometer_update_ticks = BASE_CLOCK_RATE_ARM11 / 104;
@@ -386,6 +396,8 @@ private:
     Core::TimingEventType* gyroscope_update_event;
 
     std::atomic<bool> is_device_reload_pending{true};
+    /// See GetPadUpdateCount(). Written by the emulation thread, read cross-thread.
+    std::atomic<u64> pad_update_count{0};
     std::array<std::unique_ptr<Input::ButtonDevice>, Settings::NativeButton::NUM_BUTTONS_HID>
         buttons;
     std::unique_ptr<Input::AnalogDevice> circle_pad;

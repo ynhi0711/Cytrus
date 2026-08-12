@@ -60,6 +60,14 @@ public:
         return !callback.get() || callback->SupportsSerialization();
     }
 
+    /// xappify fork addition — forward the abandonment to the inner callback (the async wakeup
+    /// balancing the kernel's pending-async counter lives there).
+    void Abandon() override {
+        if (callback) {
+            callback->Abandon();
+        }
+    }
+
 private:
     ThreadCallback() = default;
     std::shared_ptr<HLERequestContext::WakeupCallback> callback{};

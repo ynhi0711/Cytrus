@@ -300,6 +300,13 @@ static void TryShutdown() {
                 return !pause_emulation.load() || stop_run.load();
             });
 
+            // xappify fork: a Save/Load consumed just before the park would arrive at the next
+            // RunLoop with its 5s async-ops deadline already expired (the deadline is wall-clock,
+            // and async ops can only drain on THIS thread) — a deterministic spurious failure on
+            // every background→foreground trip. Give it a fresh budget. Emulation-thread-only
+            // call, which is exactly where we are.
+            system.RestampPendingSaveStateDeadline();
+
             // xappify fork: bottom_window is null in single-window setups (only top: set) —
             // stop-while-paused crashed here with a null-deref (device-verified).
             if (auto* bottom = bottom_window.get())
@@ -860,6 +867,17 @@ static void TryShutdown() {
 // was already consumed. Safe to call regardless of core state.
 -(void) cancelPendingSaveStateOperation {
     Core::System::GetInstance().CancelPendingSaveStateOperation();
+}
+
+// xappify fork addition — see the header.
+-(BOOL) isSaveStateExecuting {
+    return Core::System::GetInstance().IsSaveStateExecuting();
+}
+
+// xappify fork addition — see the header.
+-(NSString *) saveStateDiagnostics {
+    const std::string diagnostics = Core::System::GetInstance().SaveStateDiagnostics();
+    return [NSString stringWithUTF8String:diagnostics.c_str()] ?: @"";
 }
 
 -(uint64_t) runningTitleID {

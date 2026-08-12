@@ -712,6 +712,34 @@ void Module::ReloadInputDevices() {
     is_device_reload_pending.store(true);
 }
 
+// xappify fork addition — see the header.
+void Module::RearmUpdateEvents() {
+    Core::Timing& timing = system.CoreTiming();
+
+    // False here means the loaded payload did NOT carry the pad event — a poisoned state that
+    // would have come up with buttons and touch dead. The log line is the proof either way.
+    const bool pad_was_scheduled = timing.IsEventScheduled(pad_update_event);
+    timing.RemoveEvent(pad_update_event);
+    timing.ScheduleEvent(pad_update_ticks, pad_update_event);
+
+    // Accel/gyro pumps run only while the title holds them enabled (see Enable*/Disable* — the
+    // counts are serialized), so re-arm them exactly when the loaded state says they were on.
+    if (enable_accelerometer_count > 0) {
+        timing.RemoveEvent(accelerometer_update_event);
+        timing.ScheduleEvent(accelerometer_update_ticks, accelerometer_update_event);
+    }
+    if (enable_gyroscope_count > 0) {
+        timing.RemoveEvent(gyroscope_update_event);
+        timing.ScheduleEvent(gyroscope_update_ticks, gyroscope_update_event);
+    }
+
+    LOG_INFO(Service_HID,
+             "Update events re-armed after state load (pad pump was {}; accel_count={} "
+             "gyro_count={})",
+             pad_was_scheduled ? "alive in the loaded state" : "DEAD in the loaded state",
+             enable_accelerometer_count, enable_gyroscope_count);
+}
+
 const PadState& Module::GetState() const {
     return state;
 }

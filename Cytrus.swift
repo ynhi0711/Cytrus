@@ -356,6 +356,15 @@ extension Cytrus {
     /// transient failure through the handler). A request already executing is unaffected.
     public func cancelPendingSaveStateOperation() { emulator.cancelPendingSaveStateOperation() }
 
+    /// True while the emulation thread is INSIDE the core's LoadState/SaveState — the window where
+    /// `runLoopReturns` freezes but the core is busy applying the state, not dead. A watchdog
+    /// should keep waiting rather than give up here. See `CytrusEmulator.isSaveStateExecuting`.
+    public var isSaveStateExecuting: Bool { emulator.isSaveStateExecuting() }
+
+    /// One-line snapshot of the core's save-state pipeline for app logs. Safe from any thread at
+    /// any time, including mid-load. See `CytrusEmulator.saveStateDiagnostics`.
+    public var saveStateDiagnostics: String { emulator.saveStateDiagnostics() }
+
     /// Install a handler that fires on the main queue once a queued load/save actually RESOLVES.
     /// `details` is empty on success and carries the core's rejection reason otherwise (stale build
     /// revision, wrong title, pending async operations, deserialize failure). The outcome separates

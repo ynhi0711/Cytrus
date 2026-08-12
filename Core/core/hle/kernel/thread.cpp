@@ -102,6 +102,16 @@ void Thread::Stop() {
     thread_manager.kernel.timing.UnscheduleEvent(thread_manager.ThreadWakeupEventType, thread_id);
     thread_manager.wakeup_callback_table.erase(thread_id);
 
+    // xappify fork: a callback still installed here means `WakeUp` never ran (every wakeup path
+    // nulls it in `ResumeFromWait`) and never will — tell it so. Without this, a thread stopped
+    // mid-`RunAsync` leaks the kernel's pending-async counter, permanently forcing every later
+    // save-state request into the 5s "pending async operations" failure. Deliberately NOT nulled:
+    // destroying it here would join the still-running async worker inside Stop; it dies with the
+    // Thread instead.
+    if (wakeup_callback) {
+        wakeup_callback->Abandon();
+    }
+
     // Clean up thread from ready queue
     // This is only needed when the thread is termintated forcefully (SVC TerminateProcess)
     if (status == ThreadStatus::Ready) {
@@ -248,7 +258,16 @@ void ThreadManager::TerminateProcessThreads(std::shared_ptr<Process> process) {
 }
 
 void ThreadManager::ThreadWakeupCallback(u64 thread_id, s64 cycles_late) {
-    std::shared_ptr<Thread> thread = SharedFrom(wakeup_callback_table.at(thread_id));
+    // xappify fork: `find`, not `at`. A stopped thread's still-running async section calls
+    // `WakeAfterDelay` after `Stop` erased this entry and unscheduled the old event — when that
+    // late event fires, `at` throws `std::out_of_range` straight through the timing dispatch
+    // (outside every catch in the emulation loop) and terminates the process.
+    const auto iter = wakeup_callback_table.find(thread_id);
+    if (iter == wakeup_callback_table.end()) {
+        LOG_CRITICAL(Kernel, "Callback fired for stopped or invalid thread {:08X}", thread_id);
+        return;
+    }
+    std::shared_ptr<Thread> thread = SharedFrom(iter->second);
     if (thread == nullptr) {
         LOG_CRITICAL(Kernel, "Callback fired for invalid thread {:08X}", thread_id);
         return;

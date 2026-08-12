@@ -169,6 +169,20 @@ NS_ASSUME_NONNULL_BEGIN
 /// already executing inside the core cannot be cancelled; the call is then a no-op. Thread-safe.
 -(void) cancelPendingSaveStateOperation;
 
+/// xappify fork addition. YES while the emulation thread is INSIDE the core's LoadState/SaveState
+/// — the entire Shutdown+Init Vulkan rebuild, deserialize, and disk-shader-cache reload. In that
+/// window `runLoopReturns` freezes, `isPaused` stays NO, and a cancel is a no-op, so a frontend
+/// watchdog that charges "running time" against its give-up budget would abandon a load that is
+/// actively being applied. Poll this to keep waiting instead. Thread-safe.
+-(BOOL) isSaveStateExecuting;
+
+/// xappify fork addition. One-line snapshot of the core's save-state pipeline (queued signal,
+/// pending status, executing flag, async-op count, request age) for the app log — the
+/// discriminator between "never consumed", "deferred on async ops", and "executing" that a
+/// timeout would otherwise leave ambiguous. Safe to call from any thread at any time, including
+/// mid-load. Never returns nil.
+-(NSString *) saveStateDiagnostics;
+
 /// Title ID of the running application — the value save states are keyed and validated against.
 /// 0 when nothing is booted. Lets the app pre-check a .cst before requesting a load.
 -(uint64_t) runningTitleID;

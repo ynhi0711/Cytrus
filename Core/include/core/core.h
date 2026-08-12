@@ -423,6 +423,30 @@ public:
     /// TransientFailure through the outcome callback.
     void CancelPendingSaveStateOperation();
 
+    /// xappify fork addition. True while the emulation thread is INSIDE `LoadState`/`SaveState` —
+    /// the window where the request status is already cleared, a cancel is a no-op, and `RunLoop`
+    /// does not return (frontend frame counters freeze). Lets a frontend watchdog distinguish
+    /// "the core is busy applying the state" (keep waiting) from "the core never picked the
+    /// request up" (give up).
+    [[nodiscard]] bool IsSaveStateExecuting() const {
+        return save_state_executing.load(std::memory_order_relaxed);
+    }
+
+    /// xappify fork addition. Re-stamps the async-operations deadline of a pending Save/Load.
+    /// The deadline is wall-clock, so a request consumed just before the frontend parked the loop
+    /// (app backgrounding) would otherwise be expired on the first post-resume iteration — and
+    /// async ops can only drain on the emulation thread, so that spurious TransientFailure was
+    /// deterministic, not occasional. MUST be called on the emulation thread (the deadline fields
+    /// are emulation-thread-owned); the iOS loop calls it right after waking from its pause wait.
+    void RestampPendingSaveStateDeadline();
+
+    /// xappify fork addition. One-line state snapshot of the save-state pipeline for frontend
+    /// logs (queued signal, pending status, executing flag, async-op count, request age). Safe
+    /// from any thread at any time — reads only atomics published by the emulation thread plus
+    /// the mutex-guarded queued signal, never `kernel` (destroyed mid-LoadState) or the
+    /// emulation-thread-owned fields themselves.
+    [[nodiscard]] std::string SaveStateDiagnostics();
+
     /// The title ID of the running application — the value save states are keyed and validated
     /// against (see `savestate.cpp`). 0 when nothing is loaded.
     [[nodiscard]] u64 GetTitleID() const {
@@ -543,6 +567,22 @@ private:
     /// Set by `CancelPendingSaveStateOperation` (frontend thread), consumed by `RunLoop` before the
     /// pending request would execute.
     std::atomic_bool save_state_cancel_requested{false};
+    /// True while the emulation thread is inside `LoadState`/`SaveState` (see
+    /// `IsSaveStateExecuting`). A `System` member on purpose: `kernel` and friends are destroyed
+    /// and rebuilt inside the load, so nothing subsystem-owned can carry this bit.
+    std::atomic_bool save_state_executing{false};
+    /// Atomic mirror of `save_state_request_status != NONE`. Set under `signal_mutex` in the same
+    /// critical section that consumes a Save/Load signal, cleared at every resolution point. Exists
+    /// so `CancelPendingSaveStateOperation` (frontend thread) can ask "is anything actually
+    /// pending?" without racing the emulation-thread-owned status field — and without the TOCTOU
+    /// gap between the signal disappearing and the status being stored.
+    std::atomic_bool save_state_request_pending{false};
+    /// Diagnostics snapshot published by `RunLoop` for `SaveStateDiagnostics`. Frontend-thread
+    /// reads must never dereference `kernel` (it is destroyed mid-LoadState — exactly when the
+    /// frontend watchdog wants a snapshot), hence these copies. Slightly stale is fine.
+    std::atomic<u32> diag_request_status{0};
+    std::atomic<int> diag_async_pending{-1};
+    std::atomic<long long> diag_request_age_ms{-1};
     /// Human-readable phase breakdown of the last save/load, reported to the frontend as the success
     /// `details`. A load is dominated by the Vulkan teardown/rebuild inside `serialize`, not by the
     /// archive, so the split is what makes it diagnosable. `mutable` because `SaveState` is const.

@@ -336,6 +336,16 @@ public:
 
     void ReloadInputDevices();
 
+    /// xappify fork addition. Re-arms the module's self-rescheduling update events after a
+    /// save-state load. The events are scheduled ONLY in the constructor (`serialize` explicitly
+    /// doesn't carry them), and during a load the ctor's `ScheduleEvent` is a silent no-op — the
+    /// deserialize replaces the whole event queue while it is locked. So the pump survives a load
+    /// only if the SAVED queue happened to contain it, and a state saved from a session whose pump
+    /// had already died is poisoned: it loads "successfully" with input dead forever. Call after
+    /// `Timing::UnlockEventQueue()` on the load path; `RemoveEvent`-first makes it idempotent
+    /// (each surviving duplicate would self-perpetuate). Emulation thread only.
+    void RearmUpdateEvents();
+
     const PadState& GetState() const;
 
     /// xappify fork addition — input-pump liveness. `UpdatePadCallback` is a self-rescheduling

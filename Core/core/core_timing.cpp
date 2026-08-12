@@ -137,6 +137,17 @@ void Timing::RemoveEvent(const TimingEventType* event_type) {
     // TODO:remove events from ts_queue
 }
 
+bool Timing::IsEventScheduled(const TimingEventType* event_type) const {
+    for (const auto& timer : timers) {
+        for (const auto& event : timer->event_queue) {
+            if (event.type == event_type) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void Timing::SetCurrentTimer(std::size_t core_id) {
     current_timer = timers[core_id].get();
 }

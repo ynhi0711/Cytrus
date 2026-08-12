@@ -71,6 +71,11 @@ public:
     virtual void WakeUp(ThreadWakeupReason reason, std::shared_ptr<Thread> thread,
                         std::shared_ptr<WaitObject> object) = 0;
 
+    /// xappify fork addition. The owning thread was stopped (SVC TerminateProcess / exit) before
+    /// `WakeUp` ever ran — release any external state the callback was holding. `WakeUp` will
+    /// never be called afterwards. Default: nothing to release.
+    virtual void Abandon() {}
+
     virtual bool SupportsSerialization() {
         return true;
     }

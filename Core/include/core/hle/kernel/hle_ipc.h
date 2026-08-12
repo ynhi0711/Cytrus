@@ -236,6 +236,10 @@ public:
             return true;
         }
 
+        /// See `Kernel::WakeupCallback::Abandon` — the sleeping thread was stopped before this
+        /// callback ever fired.
+        virtual void Abandon() {}
+
     private:
         template <class Archive>
         void serialize(Archive& ar, const unsigned int) {}
@@ -275,6 +279,17 @@ private:
 
         bool SupportsSerialization() override {
             return false;
+        }
+
+        /// xappify fork addition. `WakeUp` above is the ONLY decrement of the kernel's
+        /// pending-async counter; a thread stopped mid-`RunAsync` (SVC TerminateProcess with an
+        /// in-flight async FS op) never runs it, latching the counter > 0 for the rest of the
+        /// session — after which every save-state request can only resolve through the 5s
+        /// "pending async operations" failure. Balance the count here instead. The `future` is
+        /// deliberately left alone: it joins the still-running async section in the destructor,
+        /// when the Thread releases this callback.
+        void Abandon() override {
+            kernel.ReportAsyncState(false);
         }
 
     private:

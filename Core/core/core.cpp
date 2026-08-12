@@ -104,6 +104,19 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
             NotifySaveStateResult(pending == Signal::Load, SaveStateOutcome::TransientFailure,
                                   status_details);
         }
+        // Same hole one stage later: a request already consumed into `save_state_request_status`
+        // (the resolution block below is unreachable from here) would otherwise pend forever —
+        // uncancellable, unreported, and blocking every future Save/Load with "has not finished
+        // yet". Resolve it the same way.
+        if (save_state_request_status != SaveStateStatus::NONE) {
+            const bool was_loading = save_state_request_status == SaveStateStatus::LOADING;
+            save_state_request_status = SaveStateStatus::NONE;
+            save_state_request_pending.store(false, std::memory_order_relaxed);
+            LOG_ERROR(Core, "Discarding pending {} — the core is not powered on",
+                      was_loading ? "Load" : "Save");
+            status_details = "Core is not powered on";
+            NotifySaveStateResult(was_loading, SaveStateOutcome::TransientFailure, status_details);
+        }
         return ResultStatus::ErrorNotInitialized;
     }
 
@@ -125,6 +138,24 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         }
     }
 
+    // A frontend cancel outranks a pending request: it is only ever sent after the frontend's own
+    // watchdog gave up, and executing the operation anyway (possibly minutes later, mid-session)
+    // is strictly worse than dropping it. Checked BEFORE the signal consume below, for two
+    // reasons: a stale latch must never kill a request queued AFTER the cancel (that next request
+    // is the manual pause-menu load the failure toast points the user at), and this block's early
+    // return must not swallow a signal already moved into a local.
+    if (save_state_cancel_requested.exchange(false, std::memory_order_relaxed) &&
+        save_state_request_status != SaveStateStatus::NONE) {
+        const bool was_loading = save_state_request_status == SaveStateStatus::LOADING;
+        save_state_request_status = SaveStateStatus::NONE;
+        save_state_request_pending.store(false, std::memory_order_relaxed);
+        LOG_ERROR(Core, "Cancelled pending {} at the frontend's request",
+                  was_loading ? "Load" : "Save");
+        status_details = "Cancelled by the frontend";
+        NotifySaveStateResult(was_loading, SaveStateOutcome::TransientFailure, status_details);
+        return ResultStatus::ErrorSavestate;
+    }
+
     Signal signal{Signal::None};
     u32 param{};
     {
@@ -133,6 +164,12 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
             signal = current_signal;
             param = signal_param;
             current_signal = Signal::None;
+            if (signal == Signal::Save || signal == Signal::Load) {
+                // Published inside the same critical section that clears the signal, so a
+                // concurrent `CancelPendingSaveStateOperation` always observes either the queued
+                // signal or the pending mirror — never the gap between them.
+                save_state_request_pending.store(true, std::memory_order_relaxed);
+            }
         }
     }
     switch (signal) {
@@ -174,26 +211,36 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         break;
     }
 
-    // A frontend cancel outranks a pending request: it is only ever sent after the frontend's own
-    // watchdog gave up, and executing the operation anyway (possibly minutes later, mid-session)
-    // is strictly worse than dropping it. `exchange` also clears a stale cancel that arrived when
-    // nothing was pending, so it cannot leak into a future request.
-    if (save_state_cancel_requested.exchange(false, std::memory_order_relaxed) &&
-        save_state_request_status != SaveStateStatus::NONE) {
-        const bool was_loading = save_state_request_status == SaveStateStatus::LOADING;
-        save_state_request_status = SaveStateStatus::NONE;
-        LOG_ERROR(Core, "Cancelled pending {} at the frontend's request",
-                  was_loading ? "Load" : "Save");
-        status_details = "Cancelled by the frontend";
-        NotifySaveStateResult(was_loading, SaveStateOutcome::TransientFailure, status_details);
-        return ResultStatus::ErrorSavestate;
+    // Publish the diagnostics snapshot while this thread may still touch `kernel` — the frontend
+    // reads it from another thread mid-load, when `kernel` can be gone (see SaveStateDiagnostics).
+    // Gated so the idle path costs one relaxed load per iteration.
+    if (save_state_request_status != SaveStateStatus::NONE ||
+        diag_request_status.load(std::memory_order_relaxed) != 0) {
+        diag_request_status.store(static_cast<u32>(save_state_request_status),
+                                  std::memory_order_relaxed);
+        diag_async_pending.store(kernel ? kernel->GetPendingAsyncOperationCount() : -1,
+                                 std::memory_order_relaxed);
+        diag_request_age_ms.store(
+            save_state_request_status == SaveStateStatus::NONE
+                ? -1
+                : std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - save_state_request_time)
+                      .count(),
+            std::memory_order_relaxed);
     }
 
     if (save_state_request_status == SaveStateStatus::LOADING && kernel.get() &&
         !kernel->AreAsyncOperationsPending()) {
         const u32 slot = save_state_slot;
         save_state_request_status = SaveStateStatus::NONE;
+        save_state_request_pending.store(false, std::memory_order_relaxed);
         LOG_INFO(Core, "Begin load of slot {}", slot);
+        // The only observable trace of the load while it runs: request status is already cleared,
+        // and this thread won't return from RunLoop until the load is done (frame counters
+        // freeze). The frontend watchdog reads this to keep waiting instead of declaring a
+        // still-running load dead. Scope guard so a throwing deserialize can't leave it stuck.
+        save_state_executing.store(true, std::memory_order_relaxed);
+        SCOPE_EXIT({ save_state_executing.store(false, std::memory_order_relaxed); });
         try {
             System::LoadState(slot);
             LOG_INFO(Core, "Load completed");
@@ -213,8 +260,11 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
     } else if (save_state_request_status == SaveStateStatus::SAVING && kernel.get() &&
                !kernel->AreAsyncOperationsPending()) {
         save_state_request_status = SaveStateStatus::NONE;
+        save_state_request_pending.store(false, std::memory_order_relaxed);
         const u32 slot = save_state_slot;
         LOG_INFO(Core, "Begin save to slot {}", slot);
+        save_state_executing.store(true, std::memory_order_relaxed);
+        SCOPE_EXIT({ save_state_executing.store(false, std::memory_order_relaxed); });
         try {
             System::SaveState(slot);
             LOG_INFO(Core, "Save completed");
@@ -232,6 +282,7 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
                    std::chrono::seconds(5)) {
         const bool was_loading = save_state_request_status == SaveStateStatus::LOADING;
         save_state_request_status = SaveStateStatus::NONE;
+        save_state_request_pending.store(false, std::memory_order_relaxed);
         LOG_ERROR(Core, "Cannot perform save state operation due to pending async operations");
         status_details = "Cannot perform save state operation due to pending async operations";
         // Never processed — the async ops may well have drained by the next attempt.
@@ -387,22 +438,34 @@ void System::SetSaveStateCallback(SaveStateCallback callback) {
 }
 
 void System::CancelPendingSaveStateOperation() {
+    bool cancelled_queued_load = false;
+    bool notify = false;
     {
         std::scoped_lock lock{signal_mutex};
         if (current_signal == Signal::Load || current_signal == Signal::Save) {
-            const bool was_load = current_signal == Signal::Load;
+            cancelled_queued_load = current_signal == Signal::Load;
             current_signal = Signal::None;
-            LOG_ERROR(Core, "Cancelled queued {} at the frontend's request",
-                      was_load ? "Load" : "Save");
-            NotifySaveStateResult(was_load, SaveStateOutcome::TransientFailure,
-                                  "Cancelled by the frontend");
-            return;
+            notify = true;
+        } else if (save_state_request_pending.load(std::memory_order_relaxed)) {
+            // Consumed but not yet executed — ask RunLoop to resolve it instead of racing the
+            // emulation-thread-owned status field. The mirror is set in the same critical section
+            // that clears the signal, so falling through BOTH branches genuinely means nothing is
+            // in flight.
+            save_state_cancel_requested.store(true, std::memory_order_relaxed);
         }
+        // else: nothing queued, nothing pending. The operation either already resolved or is
+        // executing right now — and an executing load cannot be cancelled. Arming the latch here
+        // would only kill a FUTURE request (historically: the manual pause-menu load the resume
+        // failure toast tells the user to try), so deliberately do nothing.
     }
-    // The signal may already have been consumed into `save_state_request_status`, which belongs to
-    // the emulation thread — ask RunLoop to resolve it instead of racing it. If nothing is pending
-    // when RunLoop looks, the flag is simply cleared.
-    save_state_cancel_requested.store(true, std::memory_order_relaxed);
+    // Notify outside `signal_mutex`: the callback chain must stay free to call back into this
+    // object without deadlocking.
+    if (notify) {
+        LOG_ERROR(Core, "Cancelled queued {} at the frontend's request",
+                  cancelled_queued_load ? "Load" : "Save");
+        NotifySaveStateResult(cancelled_queued_load, SaveStateOutcome::TransientFailure,
+                              "Cancelled by the frontend");
+    }
 }
 
 /// Human-readable signal name for the failure details the frontend surfaces. `Signal` has no
@@ -441,6 +504,40 @@ bool System::SendSignal(System::Signal signal, u32 param) {
     current_signal = signal;
     signal_param = param;
     return true;
+}
+
+void System::RestampPendingSaveStateDeadline() {
+    // Emulation thread only — `save_state_request_status`/`save_state_request_time` are owned by
+    // it. The iOS loop calls this right after waking from its pause wait, so a request that sat
+    // parked through a backgrounding gets a fresh 5s async-ops budget instead of arriving
+    // pre-expired (async ops can only drain on this thread, so the stale-deadline failure was
+    // deterministic).
+    if (save_state_request_status != SaveStateStatus::NONE) {
+        save_state_request_time = std::chrono::steady_clock::now();
+        LOG_INFO(Core, "Restamped pending {} deadline after pause",
+                 save_state_request_status == SaveStateStatus::LOADING ? "Load" : "Save");
+    }
+}
+
+std::string System::SaveStateDiagnostics() {
+    Signal queued;
+    {
+        std::scoped_lock lock{signal_mutex};
+        queued = current_signal;
+    }
+    const auto request =
+        static_cast<SaveStateStatus>(diag_request_status.load(std::memory_order_relaxed));
+    const char* request_name = request == SaveStateStatus::LOADING  ? "LOADING"
+                               : request == SaveStateStatus::SAVING ? "SAVING"
+                                                                    : "NONE";
+    return fmt::format("signal={} request={} executing={} pending={} cancel_latched={} "
+                       "async_ops={} request_age_ms={} powered_on={}",
+                       SignalName(queued), request_name,
+                       save_state_executing.load(std::memory_order_relaxed),
+                       save_state_request_pending.load(std::memory_order_relaxed),
+                       save_state_cancel_requested.load(std::memory_order_relaxed),
+                       diag_async_pending.load(std::memory_order_relaxed),
+                       diag_request_age_ms.load(std::memory_order_relaxed), IsPoweredOn());
 }
 
 System::ResultStatus System::SingleStep() {
@@ -1088,6 +1185,21 @@ void System::serialize(Archive& ar, const unsigned int file_version) {
         auto gsp = service_manager->GetService<Service::GSP::GSP_GPU>("gsp::Gpu");
         gpu->SetInterruptHandler(
             [gsp](Service::GSP::InterruptId interrupt_id) { gsp->SignalInterrupt(interrupt_id); });
+
+        // xappify fork: re-arm the input pumps, for the same reason the GSP handler above needs
+        // re-registering. Their events are scheduled only in the module constructors, and during
+        // the load those ScheduleEvent calls were silent no-ops (the queue above deserialized
+        // LOCKED, and `ar & timing` had already destroyed the Init-time entries) — so whether
+        // input worked after a load used to depend on whether the SAVED queue happened to carry
+        // the events. A state saved after a session's pump died is "poisoned": it loads
+        // successfully with buttons/touch dead forever, and every auto-save it seeds inherits
+        // that. The re-arm makes the pumps unconditional and heals poisoned states on disk.
+        if (auto hid = Service::HID::GetModule(*this)) {
+            hid->RearmUpdateEvents();
+        }
+        if (auto ir_rst = service_manager->GetService<Service::IR::IR_RST>("ir:rst")) {
+            ir_rst->RearmUpdateEvent();
+        }
 
         // Apply per program settings and switch the shader cache to the title running when the
         // savestate was created.

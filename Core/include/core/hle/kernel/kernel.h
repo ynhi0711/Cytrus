@@ -406,6 +406,13 @@ public:
         return pending_async_operations != 0;
     }
 
+    /// xappify fork addition — raw counter for the save-state diagnostics snapshot. A count that
+    /// never returns to 0 means a wakeup leaked (a stopped thread's async op), which forces every
+    /// Save/Load into the 5s-deadline failure path.
+    int GetPendingAsyncOperationCount() const {
+        return pending_async_operations.load();
+    }
+
     void UpdateCPUAndMemoryState(u64 title_id, MemoryMode memory_mode,
                                  New3dsHwCapabilities n3ds_hw_cap);
 

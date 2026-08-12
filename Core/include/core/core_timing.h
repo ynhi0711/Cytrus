@@ -270,6 +270,12 @@ public:
     /// We only permit one event of each type in the queue at a time.
     void RemoveEvent(const TimingEventType* event_type);
 
+    /// xappify fork addition. Whether any queue (any core) currently holds an event of this type.
+    /// Diagnostic companion to the post-load re-arm: false right after a state load means the
+    /// loaded payload's queue did NOT carry the event — a "poisoned" state whose pump would have
+    /// stayed dead without the re-arm.
+    bool IsEventScheduled(const TimingEventType* event_type) const;
+
     void SetCurrentTimer(std::size_t core_id);
 
     s64 GetTicks() const;

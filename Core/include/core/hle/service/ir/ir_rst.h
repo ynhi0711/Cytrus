@@ -46,6 +46,16 @@ public:
     ~IR_RST();
     void ReloadInputDevices();
 
+    /// xappify fork addition. Re-arms the self-rescheduling update event after a save-state load,
+    /// gated on `update_period != 0` (serialized; set by the guest's `Initialize`, which it never
+    /// re-sends after a load). Same failure mode as HID's pad pump: the event only enters the
+    /// queue via a live `ScheduleEvent`, so a state saved after the pump died loads with ZL/ZR
+    /// and the C-stick dead on N3DS-aware titles. Benign over-trigger: a guest-side `Shutdown`
+    /// unschedules without clearing `update_period`, so this can resurrect a pump the guest had
+    /// stopped — it then only writes shared memory and signals an event the guest still holds.
+    /// Emulation thread only, after `Timing::UnlockEventQueue()`.
+    void RearmUpdateEvent();
+
     void UseArticController(const std::shared_ptr<Service::HID::ArticBaseController>& ac) {
         artic_controller = ac;
     }

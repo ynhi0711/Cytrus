@@ -169,6 +169,19 @@ void IR_RST::Initialize(Kernel::HLERequestContext& ctx) {
     LOG_DEBUG(Service_IR, "called. update_period={}, raw_c_stick={}", update_period, raw_c_stick);
 }
 
+// xappify fork addition — see the header.
+void IR_RST::RearmUpdateEvent() {
+    if (update_period == 0) {
+        return;
+    }
+    auto& timing = system.CoreTiming();
+    const bool was_scheduled = timing.IsEventScheduled(update_callback_id);
+    timing.RemoveEvent(update_callback_id);
+    timing.ScheduleEvent(msToCycles(update_period), update_callback_id);
+    LOG_INFO(Service_IR, "ir:rst update event re-armed after state load (was {}, period={}ms)",
+             was_scheduled ? "alive" : "DEAD", update_period);
+}
+
 void IR_RST::Shutdown(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx);
 

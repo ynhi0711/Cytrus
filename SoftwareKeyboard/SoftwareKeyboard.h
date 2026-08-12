@@ -11,25 +11,18 @@
 #ifdef __cplusplus
 #include "core/frontend/applets/swkbd.h"
 
-#include <condition_variable>
-#include <future>
+#include <string>
+#include <utility>
 
 namespace SoftwareKeyboard {
 class Keyboard final : public Frontend::SoftwareKeyboard {
 public:
     ~Keyboard();
-    
+
     void Execute(const Frontend::KeyboardConfig& config) override;
     void ShowError(const std::string& error) override;
-    
-    void KeyboardText(std::condition_variable& cv);
+
     std::pair<std::string, uint8_t> GetKeyboardText(const Frontend::KeyboardConfig& config);
-    
-private:
-    __block NSString *_Nullable keyboardText = @"";
-    __block uint8_t buttonPressed = 0;
-    
-    __block BOOL isReady = FALSE;
 };
 }
 #endif

@@ -89,6 +89,10 @@ NS_ASSUME_NONNULL_BEGIN
     // See `requestGuestStateDump`.
     std::atomic_bool dump_guest_state;
     std::atomic_uint64_t guest_state_dumps;
+
+    // xappify fork: one-shot request to re-arm the HID/ir:rst input pumps, consumed by the
+    // `insert:` loop. See `requestInputPumpRearm`.
+    std::atomic_bool rearm_input_pumps;
 #endif
 }
 
@@ -247,6 +251,18 @@ NS_ASSUME_NONNULL_BEGIN
 /// dump actually ran before reading the log back — otherwise "the dump didn't happen" and "the log
 /// was read too early" are indistinguishable, which has already cost a debugging round.
 -(uint64_t) guestStateDumps;
+
+/// xappify fork addition. Ask the core to re-arm the HID pad/accel/gyro and ir:rst input pumps —
+/// the self-rescheduling core-timing events that consume input. Call when a frontend watchdog has
+/// confirmed the "input dead, video alive" wedge (`padUpdates` flat while `runLoopReturns`
+/// climbs): a dead pump never recovers on its own, and re-arming an alive one is harmless (the
+/// re-arm removes before scheduling, so at most the phase shifts by one tick).
+///
+/// Asynchronous BY DESIGN, same as `requestGuestStateDump`: core-timing scheduling belongs to the
+/// emulation thread, so this only sets a flag; the `insert:` loop services it on its next
+/// iteration. Confirm recovery by watching `padUpdates` move again; the core logs what it re-armed
+/// and whether the pad pump was actually dead.
+-(void) requestInputPumpRearm;
 
 /// Total swapchain rebuilds this session (see `RendererBase::GetSwapchainRecreations`).
 ///

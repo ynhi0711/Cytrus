@@ -396,22 +396,29 @@ void System::NotifySaveStateResult(bool is_load, SaveStateOutcome outcome,
                  "NotifySaveStateResult is_load={} outcome={} callback_installed={} details='{}'",
                  is_load, static_cast<int>(outcome), static_cast<bool>(save_state_callback),
                  details);
-        if (outcome != SaveStateOutcome::Success) {
-            // Failures are exactly what the frontend's log-tail dumps need to show — flush so the
-            // line is on disk before the app reads the file.
-            Common::Log::FlushBackends();
-        }
         if (!save_state_callback) {
             // No handler yet (boot-queued request resolving before the frontend wired up) — latch
             // instead of dropping; `SetSaveStateCallback` delivers it. Newest outcome wins.
+            // No early return: the failure flush below must still run.
             undelivered_save_state_outcome = std::make_tuple(is_load, outcome, details);
-            return;
+        } else {
+            callback = save_state_callback;
         }
-        callback = save_state_callback;
+    }
+    if (outcome != SaveStateOutcome::Success) {
+        // Failures are exactly what the frontend's log-tail dumps need to show — flush so the
+        // line is on disk before the app reads the file. OUTSIDE the mutex: FlushBackends is a
+        // handshake with the logging thread that can wait up to 2s, and holding
+        // save_state_callback_mutex across it would stall the frontend thread's
+        // SetSaveStateCallback/Notify calls for the duration. Queue FIFO still guarantees the
+        // lines above are on disk before the callback below runs.
+        Common::Log::FlushBackends();
     }
     // Outside the lock: the callback may be arbitrarily slow, and must be free to call back into
     // `SetSaveStateCallback` without deadlocking.
-    callback(is_load, outcome, details);
+    if (callback) {
+        callback(is_load, outcome, details);
+    }
 }
 
 void System::SetSaveStateCallback(SaveStateCallback callback) {

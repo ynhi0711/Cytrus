@@ -3,6 +3,10 @@
 // Refer to the license.txt file included.
 
 #include <chrono>
+#include <condition_variable>
+#include <limits>
+#include <mutex>
+#include <thread>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/regex.hpp>
 
@@ -181,6 +185,12 @@ public:
         const bool write_limit_exceeded = bytes_written > write_limit;
         if (entry.log_level >= Level::Error || write_limit_exceeded) {
             if (write_limit_exceeded) {
+                // xappify fork: say so — a capped log used to just END mid-session, which reads
+                // as "the process died here" and has misdirected a diagnosis before. Not added
+                // to bytes_written (writes are disabled right after).
+                file->WriteString(
+                    "cytrus_log truncated at 100 MiB — logging disabled for the rest of the "
+                    "session\n");
                 // Stop writing after the write limit is exceeded.
                 // Don't close the file so we can print a stacktrace if necessary
                 enabled = false;
@@ -343,14 +353,45 @@ public:
         color_console_backend.SetEnabled(enabled);
     }
 
-    // xappify fork: drain whatever the logging thread has not written yet, then flush the backends,
-    // so a diagnostic burst is fully on disk before anything reads the log file back.
+    // xappify fork: guarantee everything logged BEFORE this call is on disk before returning, so
+    // a diagnostic burst can be read back from the file immediately.
+    //
+    // Implemented as a sentinel HANDSHAKE through the backend thread — never by consuming
+    // `message_queue` here. The queue is single-consumer (`MPSCQueue`); an earlier version of
+    // this function TryPop'd it from caller threads, and two concurrent consumers double-pop
+    // until `m_read_index` overruns `m_write_index`, after which the producer-side wait
+    // predicate underflows (unsigned) to permanently false and EVERY thread that logs deadlocks
+    // behind the queue's write mutex — a device-reproduced total emulator freeze.
+    //
+    // Bounded: one 2s budget covers both getting the sentinel into a (possibly full) queue and
+    // waiting for the backend thread to process it. If the backend thread is stopped or wedged,
+    // this returns without the on-disk guarantee instead of wedging the caller.
+    //
+    // Ticket order is load-bearing: the ticket is taken BEFORE the push, so `flush_completed >=
+    // ticket` implies (pigeonhole over FIFO order) that a sentinel pushed no earlier than this
+    // caller's log entries has been processed — i.e. those entries were written and a flush ran
+    // after them.
     void FlushBackends() {
-        Entry entry;
-        while (message_queue.TryPop(entry)) {
-            ForEachBackend([&entry](Backend& backend) { backend.Write(entry); });
+        const u64 ticket = flush_requested.fetch_add(1, std::memory_order_relaxed) + 1;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+
+        // Ordinary entries may be dropped when the queue is full (see PushEntry), but the
+        // sentinel must get IN for the handshake to mean anything — retry briefly. Never a
+        // blocking Emplace: after Log::Stop() (reachable from any failed ASSERT) there is no
+        // consumer, and a caller stuck here would never finish crashing.
+        bool pushed = message_queue.TryEmplace(MakeFlushSentinel());
+        while (!pushed && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            pushed = message_queue.TryEmplace(MakeFlushSentinel());
         }
-        ForEachBackend([](Backend& backend) { backend.Flush(); });
+        if (!pushed) {
+            return;
+        }
+
+        std::unique_lock lock{flush_mutex};
+        flush_cv.wait_until(lock, deadline, [this, ticket] {
+            return flush_completed.load(std::memory_order_relaxed) >= ticket;
+        });
     }
 
     void PushEntry(Class log_class, Level log_level, const char* filename, unsigned int line_num,
@@ -367,8 +408,41 @@ public:
                 backend.Flush();
             });
         } else {
-            message_queue.EmplaceWait(new_entry);
+            // xappify fork: a full queue DROPS the entry instead of blocking the producer. The
+            // old EmplaceWait parked the calling thread until the writer made room — under a
+            // log burst that was the EMULATION thread, and a parked producer holds the queue's
+            // write mutex, so one saturated burst stalled every logging thread in the process.
+            // A dropped log line is strictly better than a frozen emulator; drops are counted
+            // and reported on the next successful push.
+            if (message_queue.TryEmplace(std::move(new_entry))) {
+                if (const u64 dropped = dropped_entries.exchange(0, std::memory_order_relaxed)) {
+                    if (!message_queue.TryEmplace(CreateEntry(
+                            Class::Log, Level::Warning, __FILE__, __LINE__, __func__,
+                            fmt::format("logging dropped {} entries under pressure", dropped),
+                            time_origin))) {
+                        dropped_entries.fetch_add(dropped, std::memory_order_relaxed);
+                    }
+                }
+            } else {
+                dropped_entries.fetch_add(1, std::memory_order_relaxed);
+            }
         }
+    }
+
+    // xappify fork: marks a FlushBackends handshake sentinel. Distinguishable from both real
+    // entries (real line numbers + non-null filename) and a default-constructed Entry left by a
+    // stop-token wake (line_num 0).
+    static constexpr unsigned int flush_sentinel_line = std::numeric_limits<unsigned int>::max();
+
+    // xappify fork: valid class/level on purpose — if a sentinel ever leaked into a formatter,
+    // the name lookups' UNREACHABLE() paths would recurse into logging teardown.
+    static Entry MakeFlushSentinel() {
+        Entry sentinel{};
+        sentinel.log_class = Class::Log;
+        sentinel.log_level = Level::Critical;
+        sentinel.filename = nullptr;
+        sentinel.line_num = flush_sentinel_line;
+        return sentinel;
     }
 
     static Entry CreateEntry(Class log_class, Level log_level, const char* filename,
@@ -466,19 +540,45 @@ private:
             const auto write_logs = [this, &entry]() {
                 ForEachBackend([&entry](Backend& backend) { backend.Write(entry); });
             };
+            // xappify fork: services a FlushBackends handshake sentinel — flush HERE, on the
+            // one thread that owns the backends, then release the waiter. The completion
+            // increment happens under flush_mutex so a waiter that just evaluated its
+            // predicate can't sleep through the notify.
+            const auto complete_flush = [this]() {
+                ForEachBackend([](Backend& backend) { backend.Flush(); });
+                {
+                    std::scoped_lock lk{flush_mutex};
+                    flush_completed.fetch_add(1, std::memory_order_relaxed);
+                }
+                flush_cv.notify_all();
+            };
             while (!stop_token.stop_requested()) {
                 message_queue.PopWait(entry, stop_token);
                 // Only write the log if something was actually popped (entry.filename != nullptr)
                 // (for example, when the stop token is signaled).
                 if (entry.filename != nullptr) {
                     write_logs();
+                } else if (entry.line_num == flush_sentinel_line) {
+                    complete_flush();
                 }
+                // xappify fork: a stop-token wake returns WITHOUT touching `entry`, leaving the
+                // previous iteration's value — which used to re-write the last line once at
+                // shutdown, and would double-count a stale sentinel and corrupt the flush
+                // ticket accounting. Reset every iteration.
+                entry = Entry{};
             }
             // Drain the logging queue. Only writes out up to MAX_LOGS_TO_WRITE to prevent a
             // case where a system is repeatedly spamming logs even on close.
             int max_logs_to_write = filter.IsDebug() ? INT_MAX : 100;
             while (max_logs_to_write-- && message_queue.TryPop(entry)) {
-                write_logs();
+                // xappify fork: same guards as the live loop — a sentinel reaching the
+                // formatter would pass a null filename into fmt (UB), and signalling drained
+                // sentinels releases any waiter early instead of costing them the timeout.
+                if (entry.filename != nullptr) {
+                    write_logs();
+                } else if (entry.line_num == flush_sentinel_line) {
+                    complete_flush();
+                }
             }
         });
     }
@@ -560,6 +660,13 @@ private:
     std::chrono::steady_clock::time_point time_origin{std::chrono::steady_clock::now()};
     std::jthread backend_thread;
 
+    // xappify fork: FlushBackends handshake + drop accounting — see FlushBackends()/PushEntry().
+    std::atomic<u64> flush_requested{0};
+    std::atomic<u64> flush_completed{0};
+    std::mutex flush_mutex;
+    std::condition_variable flush_cv;
+    std::atomic<u64> dropped_entries{0};
+
 #ifdef CITRA_LINUX_GCC_BACKTRACE
     std::atomic_int received_signal{0};
     std::array<u8, 4096> backtrace_storage{};
@@ -605,6 +712,11 @@ void SetColorConsoleBackendEnabled(bool enabled) {
 }
 
 void FlushBackends() {
+    // xappify fork: no-op before Initialize — Instance() throws, and callers include core paths
+    // that can run in harnesses without logging set up.
+    if (!logging_initialized) {
+        return;
+    }
     Impl::Instance().FlushBackends();
 }
 

@@ -388,6 +388,10 @@ extension Cytrus {
     /// Input-pump liveness — see `CytrusEmulator.padUpdates`. Frozen while `runLoopReturns` climbs
     /// means input is dead; restarts at 0 after a save-state load (treat decreases as reanchors).
     public var padUpdates: UInt64 { emulator.padUpdates() }
+
+    /// Re-arm the input pumps after a confirmed input wedge — see
+    /// `CytrusEmulator.requestInputPumpRearm`. Asynchronous; watch `padUpdates` recover.
+    public func requestInputPumpRearm() { emulator.requestInputPumpRearm() }
     
     public func insertAmiibo(_ url: URL) -> Bool { emulator.insertAmiibo(url) }
     public func removeAmiibo() { emulator.removeAbiibo() }

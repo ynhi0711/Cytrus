@@ -20,6 +20,7 @@
 // xappify fork: the wedge dump reaches into GSP for the interrupt/framebuffer state.
 #include "core/hle/service/gsp/gsp_gpu.h"
 #include "core/hle/service/hid/hid.h"
+#include "core/hle/service/ir/ir_rst.h"
 #include "core/hle/service/sm/sm.h"
 
 #define SDL_MAIN_HANDLED
@@ -82,6 +83,7 @@ static void TryShutdown() {
         run_loop_returns.store(0);
         dump_guest_state.store(false);
         guest_state_dumps.store(0);
+        rearm_input_pumps.store(false);
 
         SDL_SetMainReady();
     } return self;
@@ -133,6 +135,8 @@ static void TryShutdown() {
     emu_thread_finished.store(false);
     loop_ticks.store(0);
     run_loop_returns.store(0);
+    // A rearm requested against a previous session must not fire into this boot.
+    rearm_input_pumps.store(false);
 
     // Registered FIRST so it runs LAST (scope guards unwind LIFO) — after the `TryShutdown()` guard
     // below, after Network/InputManager shutdown, on every exit path including a failed Load. The
@@ -276,6 +280,23 @@ static void TryShutdown() {
             Common::Log::FlushBackends();
             // Publish AFTER the flush, so a frontend that polls this can read the log immediately.
             guest_state_dumps.fetch_add(1, std::memory_order_release);
+        }
+
+        // xappify fork: serviced AFTER the dump block above on purpose — a dump requested in the
+        // same episode must capture the wedged state before the re-arm mutates it. Emulation
+        // thread because core-timing scheduling belongs to it. See `requestInputPumpRearm`.
+        // Deliberately NO FlushBackends here: nothing reads the log right after this, and any
+        // later dump's own flush covers these lines via queue FIFO.
+        if (rearm_input_pumps.exchange(false, std::memory_order_relaxed)) {
+            if (system.IsPoweredOn()) {
+                if (auto hid = Service::HID::GetModule(system)) {
+                    hid->RearmUpdateEvents();
+                }
+                if (auto ir_rst =
+                        system.ServiceManager().GetService<Service::IR::IR_RST>("ir:rst")) {
+                    ir_rst->RearmUpdateEvent();
+                }
+            }
         }
 
         if (!pause_emulation.load()) {
@@ -492,6 +513,15 @@ static void TryShutdown() {
 
 -(uint64_t) guestStateDumps {
     return guest_state_dumps.load(std::memory_order_acquire);
+}
+
+// xappify fork addition — see the header. Same not-running guard as `requestGuestStateDump`: a
+// flag set with no session live would otherwise fire into the next (healthy) boot.
+-(void) requestInputPumpRearm {
+    if (stop_run.load() || !Core::System::GetInstance().IsPoweredOn()) {
+        return;
+    }
+    rearm_input_pumps.store(true, std::memory_order_relaxed);
 }
 
 -(uint64_t) swapchainRecreations {
@@ -717,13 +747,20 @@ static void TryShutdown() {
     }
 
     // Miscellaneous
+    //
+    // xappify fork: Trace/Debug cap Render.Vulkan at Info. The disk shader cache logs 2-4 Debug
+    // lines PER PIPELINE while (re)initializing — a save-state load re-runs the full pass and
+    // emitted ~700K lines (100 MiB) in one burst on device, saturating the bounded log queue.
+    // With producers now dropping under pressure, the burst would silently eat diagnostics; per-
+    // class capping removes it at the source. Re-enable via an INI log_filter when actually
+    // debugging the shader cache.
     std::string log_filter{"*:Info"};
     switch ([defaults integerForKey:@"cytrus.v1.38.logLevel"]) {
         case 0:
-            log_filter = std::string{"*:Trace"};
+            log_filter = std::string{"*:Trace Render.Vulkan:Info"};
             break;
         case 1:
-            log_filter = std::string{"*:Debug"};
+            log_filter = std::string{"*:Debug Render.Vulkan:Info"};
             break;
         case 2:
             log_filter = std::string{"*:Info"};

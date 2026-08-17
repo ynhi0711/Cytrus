@@ -247,6 +247,25 @@ System::ResultStatus System::RunLoop(bool tight_loop) {
         } catch (const std::exception& e) {
             LOG_ERROR(Core, "Error loading: {}", e.what());
             status_details = e.what();
+            // xappify fork: the load branch of `serialize` runs Shutdown+Init BEFORE
+            // deserializing, so a throw mid-deserialize leaves a rebuilt, powered-on system whose
+            // pad-update events were never armed (the Init-time ScheduleEvent calls no-op'd
+            // against the locked queue, and the success-path rearm below never ran) — video keeps
+            // presenting, input is dead. The serialize SCOPE_EXIT has already unlocked the queue
+            // by the time this catch runs, so scheduling works again. Best-effort: a throw can
+            // leave service_manager partially deserialized, so swallow secondary failures.
+            try {
+                if (kernel.get() && service_manager) {
+                    if (auto hid = Service::HID::GetModule(*this)) {
+                        hid->RearmUpdateEvents();
+                    }
+                    if (auto ir_rst = service_manager->GetService<Service::IR::IR_RST>("ir:rst")) {
+                        ir_rst->RearmUpdateEvent();
+                    }
+                }
+            } catch (...) {
+                LOG_WARNING(Core, "Input pump rearm after failed savestate load threw; skipped");
+            }
             // The state was read and rejected (validation, truncated payload, deserialize) — the
             // same file will fail identically next time, so tell the frontend not to retry it.
             NotifySaveStateResult(true, SaveStateOutcome::PermanentFailure, status_details);
